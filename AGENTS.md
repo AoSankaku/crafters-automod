@@ -58,4 +58,7 @@ The LLM may review T2 and T3 cases only. It may recommend clearing a case, retai
 - Keep `AUTOMOD_MODE=dry-run` as the default.
 - Build before reporting completion.
 - Report any behavior that cannot be verified against a live Misskey server.
-- Do not commit changes; provide a suggested English commit message.
+- After appropriate verification, automatically create local commits grouped by cohesive changes unless the user explicitly requests otherwise.
+- Use the configured SSH commit signing and English Conventional Commit messages.
+- Do not push commits to a remote.
+- Report the created commits in the completion summary.

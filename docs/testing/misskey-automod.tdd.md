@@ -21,7 +21,7 @@ The implementation follows the project `AGENTS.md` and these operator journeys:
 | Queue capacity | `bun test test/persistence.test.js test/config.test.js` | 6 pass, 2 fail because the queue and configuration had no upper bound | 8 pass after adding `MAX_QUEUED_JOBS` and fail-closed capacity handling |
 | Final suite | `bun test --coverage` | N/A | 36 pass, 0 fail, 88 assertions |
 
-No Git checkpoint commits were created because this directory is not a Git repository and the operator retains commit control.
+No Git checkpoint commits were created during the original implementation because this directory had no Git repository and commits were prohibited at that time. The user subsequently authorized automatic local commits, and the completed work was recorded in a new local repository.
 
 ## Test specification
 

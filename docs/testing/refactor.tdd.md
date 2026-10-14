@@ -22,7 +22,7 @@ Operator guarantees:
 | Protected role shapes | `bun test ./test/enforcement.test.js ./test/moderation.test.js ./test/persistence.test.js` | 22 passed, 1 failed: nested administrator/moderator roles were not protected | 23 passed after checking nested role flags |
 | Health startup | `bun test test/health.test.js -t 'reports startup failures'` | 1 failed: startup returned a server rather than an awaitable result | `bun test test/health.test.js test/application.test.js`: 7 passed; final startup-failure test uses an occupied local port |
 
-No commits were created: the project forbids commits, and this directory has no Git metadata.
+No commits were created during the original refactor: commits were prohibited at that time, and this directory had no Git metadata. The user subsequently authorized automatic local commits. The completed implementation and deployment work were then recorded in a new local repository; those commits are completed-work snapshots rather than RED/GREEN checkpoint commits.
 
 ## Final verification
 
