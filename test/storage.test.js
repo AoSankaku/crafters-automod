@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,10 +13,22 @@ import {
 const directories = [];
 const stores = [];
 
-afterEach(async () => {
+afterAll(async () => {
   await Promise.all(stores.splice(0).map((store) => store.close()));
-  await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+  await Promise.all(directories.splice(0).map(removeDirectory));
 });
+
+async function removeDirectory(path) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (error?.code !== "EBUSY" || attempt === 4) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+}
 
 async function fixture(options = {}) {
   const directory = await mkdtemp(join(tmpdir(), "automod-store-"));
@@ -33,7 +45,7 @@ async function fixture(options = {}) {
     stores.push(store);
     return store;
   });
-  return { open, setNow: (value) => { now = value; }, getNow: () => now };
+  return { open, directory, setNow: (value) => { now = value; }, getNow: () => now };
 }
 
 function envelope(noteId, userId = `user-${noteId}`) {
@@ -42,7 +54,6 @@ function envelope(noteId, userId = `user-${noteId}`) {
     noteId,
     userId,
     receivedAt: 1_000,
-    note: { id: noteId, userId },
   };
 }
 
@@ -58,6 +69,7 @@ describe("durable moderation store (SQLite)", () => {
     const claim = await store.claim({ workerId: "worker-1", leaseMs: 500 });
     expect(claim?.noteId).toBe("note-1");
     await store.record({ type: "case.completed", caseId: "case-1", noteId: "note-1", userId: "user-note-1", actor: "deterministic" }, { lease: claim });
+    await store.complete(claim);
     await store.enqueueJob("review", caseJob("case-1", "user-note-1"));
     await store.close();
     stores.splice(stores.indexOf(store), 1);
@@ -233,14 +245,14 @@ describe("durable moderation store (SQLite)", () => {
     const store = await open();
     await store.enqueue(envelope("n1", "u1"));
     const old = await store.claim({ workerId: "old", leaseMs: 10 });
-    expect(await store.getAction("c1", "suspend")).toBeNull();
+    expect(await store.getAction("n1", "suspend")).toBeNull();
     await store.startAction(old, "suspend");
-    expect(await store.getAction("c1", "suspend")).toEqual({ status: "started" });
+    expect(await store.getAction("n1", "suspend")).toEqual({ status: "started" });
     setNow(1_010);
     const current = await store.claim({ workerId: "new", leaseMs: 100 });
     await expect(store.completeAction(old, "suspend")).rejects.toBeInstanceOf(LeaseLostError);
     await store.completeAction(current, "suspend");
-    expect(await store.getAction("c1", "suspend")).toEqual({ status: "completed" });
+    expect(await store.getAction("n1", "suspend")).toEqual({ status: "completed" });
     expect(await store.startAction(current, "suspend")).toBe(false);
     await expect(store.resetAction(current, "suspend")).rejects.toThrow();
   });
@@ -268,5 +280,181 @@ describe("durable moderation store (SQLite)", () => {
       .rejects.toBeInstanceOf(StorageError);
     await expect(createStore({ backend: "postgres", databaseUrl: "not-a-database-url", namespace: "test" }))
       .rejects.toBeInstanceOf(StorageError);
+  });
+
+  test("exports and restores durable state, rebasing leases and retaining attempts and started journals", async () => {
+    const { open, directory } = await fixture();
+    const source = await open();
+    const pending = envelope("pending", "u-pending");
+    const running = envelope("running", "u-running");
+    await source.enqueue(pending);
+    await source.enqueue(running);
+    const runningClaim = await source.claim({ workerId: "source-worker", leaseMs: 50_000 });
+    expect(runningClaim.noteId).toBe("pending");
+    await source.startAction(runningClaim, "suspend");
+    const completed = await source.enqueue(envelope("completed", "u-completed"));
+    expect(completed.inserted).toBe(true);
+    const completedClaim = await source.claim({ workerId: "source-worker", leaseMs: 50_000 });
+    await source.record({ type: "case.completed", caseId: "completed", noteId: "completed", userId: "u-completed", actor: "deterministic" }, { lease: completedClaim });
+    await source.complete(completedClaim);
+    await source.enqueueJob("review", caseJob("review-1", "u-review"));
+    await source.enqueueJob("purge", caseJob("purge-1", "u-purge"));
+    await source.setHumanDecision({ scope: "user", id: "human-1", reason: "moderator decision" });
+    await source.markImport("legacy-file-fingerprint");
+    await source.tryApiSlot(100);
+    await source.blockApi(1_000);
+
+    const exported = [];
+    for await (const record of source.exportState()) exported.push(record);
+    expect(exported[0]).toMatchObject({ kind: "meta", namespace: "test", schemaVersion: 1 });
+    const footer = exported.at(-1);
+    expect(footer).toMatchObject({ kind: "footer", namespace: "test", schemaVersion: 1 });
+    expect(typeof footer.recordCount).toBe("number");
+    expect(typeof footer.digest).toBe("string");
+
+    const target = await open({ sqlitePath: ":memory:" });
+    for (const record of exported) await target.importState(record);
+    for (const record of exported) expect(await target.importState(record)).toMatchObject({ imported: false });
+
+    const stats = await target.stats();
+    expect(stats).toMatchObject({ pending: 2, running: 0, dead: 0, completed: 1, reviewJobs: 1, purgeJobs: 1 });
+    expect(stats.apiRequests).toBe(1);
+    expect(stats.apiBlockedUntil).toBeGreaterThan(1_000);
+    expect(await target.hasProcessed("completed")).toBe(true);
+    expect(await target.hasHumanDecision({ userId: "human-1" })).toBe(true);
+    expect(await target.hasImport("legacy-file-fingerprint")).toBe(true);
+    expect(await target.getAction("pending", "suspend")).toEqual({ status: "started" });
+
+    const restoredClaim = await target.claim({ workerId: "target-worker", leaseMs: 100 });
+    expect(restoredClaim.noteId).toBe("pending");
+    expect(restoredClaim.attempts).toBe(2);
+    const restoredRunning = await target.claim({ workerId: "target-worker", leaseMs: 100 });
+    expect(restoredRunning.noteId).toBe("running");
+    expect(await target.complete(runningClaim)).toBe(false);
+  });
+
+  test("resumes a partial state import, rejects changed records, and gates until a verified footer", async () => {
+    const { open, setNow } = await fixture();
+    const source = await open();
+    await source.enqueue(envelope("a-pending", "u-pending"));
+    await source.enqueue(envelope("z-done", "u-done"));
+    const pending = await source.claim({ workerId: "source", leaseMs: 500 });
+    await source.startAction(pending, "uncertain-action");
+    const done = await source.claim({ workerId: "source", leaseMs: 500 });
+    await source.startAction(done, "confirmed-action");
+    await source.completeAction(done, "confirmed-action");
+    await source.setHumanDecision({ scope: "note", id: "z-done", reason: "reviewed by moderator" });
+    await source.record({ type: "case.completed", caseId: "z-done", noteId: "z-done", userId: "u-done", actor: "human" }, { lease: done });
+    await source.complete(done);
+    await source.markImport("legacy-file-fingerprint");
+    await source.importLegacyRecord("audit", {
+      type: "legacy.reviewed", caseId: "legacy-case", noteId: "legacy-note", actor: "human",
+    }, "legacy-audit-key");
+    await source.enqueueJob("review", caseJob("review-case", "review-user"));
+    await source.tryApiSlot(100);
+    await source.blockApi(2_000);
+
+    const records = [];
+    for await (const record of source.exportState()) records.push(record);
+    expect(records.at(-1).recordCount).toBe(records.length - 2);
+    setNow(2_000);
+    const laterExport = [];
+    for await (const record of source.exportState()) laterExport.push(record);
+    expect(laterExport).toEqual(records);
+
+    const migrationDirectory = await mkdtemp(join(tmpdir(), "automod-import-"));
+    directories.push(migrationDirectory);
+    const targetPath = join(migrationDirectory, "target.sqlite");
+    let target = await open({ sqlitePath: targetPath, namespace: "test" });
+    expect(await target.importState(records[0])).toEqual({ imported: true });
+    expect(await target.importState(records[1])).toEqual({ imported: true });
+    await expect(target.stats()).rejects.toBeInstanceOf(StorageError);
+    await target.close();
+    stores.splice(stores.indexOf(target), 1);
+
+    target = await open({ sqlitePath: targetPath, namespace: "test" });
+    const changedRecord = { ...records[1], userId: "different-user" };
+    await expect(target.importState(changedRecord)).rejects.toBeInstanceOf(StorageError);
+    const invalidFooter = { ...records.at(-1), digest: "0".repeat(64) };
+    for (const record of records.slice(1, -1)) await target.importState(record);
+    await expect(target.importState(invalidFooter)).rejects.toBeInstanceOf(StorageError);
+    await expect(target.stats()).rejects.toBeInstanceOf(StorageError);
+    expect(await target.importState(records.at(-1))).toEqual({ imported: true });
+    expect(await target.importState(records.at(-1))).toEqual({ imported: false });
+
+    expect(await target.stats()).toMatchObject({ pending: 1, running: 0, completed: 1, reviewJobs: 1, apiRequests: 1 });
+    expect(await target.hasProcessed("z-done")).toBe(true);
+    expect(await target.hasHumanDecision({ noteId: "z-done" })).toBe(true);
+    expect(await target.hasImport("legacy-file-fingerprint")).toBe(true);
+    expect(await target.importLegacyRecord("audit", {
+      type: "legacy.reviewed", caseId: "legacy-case", noteId: "legacy-note", actor: "human",
+    }, "legacy-audit-key")).toEqual({ imported: false });
+    expect(await target.getAction("a-pending", "uncertain-action")).toEqual({ status: "started" });
+    expect(await target.getAction("z-done", "confirmed-action")).toEqual({ status: "completed" });
+    expect((await target.stats()).apiBlockedUntil).toBeGreaterThan(1_000);
+
+    const restored = await target.claim({ workerId: "target", leaseMs: 500 });
+    expect(restored.noteId).toBe("a-pending");
+    expect(restored.attempts).toBe(2);
+  });
+
+  test("requireExisting rejects a missing namespace instead of initializing an empty source", async () => {
+    const { open } = await fixture();
+    const existing = await open({ namespace: "existing" });
+    await existing.close();
+    stores.splice(stores.indexOf(existing), 1);
+    await expect(open({ namespace: "missing", requireExisting: true })).rejects.toBeInstanceOf(StorageError);
+  });
+
+  test("rejects migration namespace/schema mismatches and non-empty destinations", async () => {
+    const { open } = await fixture();
+    const empty = await open({ sqlitePath: ":memory:" });
+    await expect(empty.importState({ kind: "meta", schemaVersion: 2, namespace: "test", sourceId: "src" }))
+      .rejects.toBeInstanceOf(StorageError);
+    await expect(empty.importState({ kind: "meta", schemaVersion: 1, namespace: "elsewhere", sourceId: "src" }))
+      .rejects.toBeInstanceOf(StorageError);
+
+    await empty.enqueue(envelope("already-present", "u1"));
+    await expect(empty.importState({ kind: "meta", schemaVersion: 1, namespace: "test", sourceId: "src" }))
+      .rejects.toBeInstanceOf(StorageError);
+    expect(await empty.stats()).toMatchObject({ pending: 1 });
+  });
+
+  test("imports legacy audits and jobs exactly once using a caller-stable key", async () => {
+    const { open } = await fixture();
+    const store = await open();
+    const audit = { type: "case.completed", caseId: "legacy-case", noteId: "legacy-note", userId: "legacy-user", actor: "human", reason: "reviewed" };
+    expect(await store.importLegacyRecord("audit", audit, "audit-sha256-1")).toEqual({ imported: true });
+    expect(await store.importLegacyRecord("audit", audit, "audit-sha256-1")).toEqual({ imported: false });
+    expect(await store.hasProcessed("legacy-note")).toBe(true);
+    expect(await store.hasHumanDecision({ caseId: "legacy-case" })).toBe(true);
+
+    expect(await store.importLegacyRecord("review", caseJob("legacy-review", "legacy-user"), "review-sha256-1"))
+      .toEqual({ imported: true });
+    expect(await store.importLegacyRecord("review", caseJob("legacy-review", "legacy-user"), "review-sha256-1"))
+      .toEqual({ imported: false });
+    expect(await store.stats()).toMatchObject({ reviewJobs: 1 });
+    expect(await store.hasImport("fingerprint-1")).toBe(false);
+    await store.markImport("fingerprint-1");
+    expect(await store.hasImport("fingerprint-1")).toBe(true);
+    await expect(store.importLegacyRecord("unknown", {}, "key")).rejects.toBeInstanceOf(StorageError);
+  });
+
+  test("restores every human decision scope from imported human.decision audit events", async () => {
+    const { open } = await fixture();
+    const store = await open();
+    for (const scope of ["case", "note", "user"]) {
+      expect(await store.importLegacyRecord("audit", {
+        type: "human.decision", scope, id: `human-${scope}`, actor: "human", reason: "moderator decision",
+      }, `human-${scope}`)).toEqual({ imported: true });
+      expect(await store.hasHumanDecision({
+        caseId: scope === "case" ? `human-${scope}` : undefined,
+        noteId: scope === "note" ? `human-${scope}` : undefined,
+        userId: scope === "user" ? `human-${scope}` : undefined,
+      })).toBe(true);
+    }
+    await expect(store.importLegacyRecord("audit", {
+      type: "human.decision", scope: "case", id: "invalid", actor: "deterministic", reason: "not human",
+    }, "invalid-human-decision")).rejects.toBeInstanceOf(StorageError);
   });
 });
