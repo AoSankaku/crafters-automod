@@ -57,7 +57,7 @@ describe("TieredModerationEngine", () => {
   test("T1 suspends first and enqueues a bounded historical purge", async () => {
     const { engine, moderator, purgeQueue, reviewQueue } = createHarness();
     await engine.process(note, [rule("T1")]);
-    expect(moderator.suspendUser).toHaveBeenCalledWith("user-1");
+    expect(moderator.suspendUser).toHaveBeenCalledWith("user-1", expect.objectContaining({ beforeRequest: expect.any(Function) }));
     expect(purgeQueue.enqueue).toHaveBeenCalledWith({ caseId: "note-1", userId: "user-1" });
     expect(reviewQueue.enqueue).not.toHaveBeenCalled();
   });
@@ -65,7 +65,7 @@ describe("TieredModerationEngine", () => {
   test("T2 assigns the restrictive role and schedules delayed LLM review", async () => {
     const { engine, moderator, purgeQueue, reviewQueue } = createHarness();
     await engine.process(note, [rule("T2")]);
-    expect(moderator.assignRole).toHaveBeenCalledWith("user-1", "restricted-role");
+    expect(moderator.assignRole).toHaveBeenCalledWith("user-1", "restricted-role", expect.objectContaining({ beforeRequest: expect.any(Function) }));
     expect(moderator.suspendUser).not.toHaveBeenCalled();
     expect(purgeQueue.enqueue).not.toHaveBeenCalled();
     expect(reviewQueue.enqueue).toHaveBeenCalledWith(
@@ -134,6 +134,21 @@ describe("TieredModerationEngine", () => {
     expect(moderator.showUser).not.toHaveBeenCalled();
     expect(purgeQueue.enqueue).not.toHaveBeenCalled();
     expect(reviewQueue.enqueue).not.toHaveBeenCalled();
+  });
+
+  test("supports asynchronous durable completion lookup", async () => {
+    const { engine, ledger, reviewQueue } = createHarness();
+    ledger.hasProcessed = mock(async () => false);
+    await engine.process(note, [rule("T3")]);
+    expect(reviewQueue.enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  test("processes a persisted classification without needing the original note", async () => {
+    const { engine, ledger, moderator } = createHarness();
+    const moderationCase = { caseId: note.id, noteId: note.id, userId: note.userId, tier: "T3", ruleIds: ["t3-rule"], reasons: ["T3 reason"] };
+    expect(await engine.processCase(moderationCase)).toBe(true);
+    expect(moderator.suspendUser).not.toHaveBeenCalled();
+    expect(ledger.record).toHaveBeenCalledWith(expect.objectContaining({ type: "case.completed", noteId: note.id }));
   });
 
   test("retries T2 after the delayed review queue fails", async () => {
