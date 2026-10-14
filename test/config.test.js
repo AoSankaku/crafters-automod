@@ -46,4 +46,26 @@ describe("loadConfig", () => {
       expect(() => loadConfig({ ...env, MAX_PENDING_NOTES: value })).toThrow(/MAX_PENDING_NOTES/);
     }
   });
+
+  test("defaults to one SQLite process and validates distributed configuration", () => {
+    const env = { MISSKEY_URL: "https://misskey.example", MISSKEY_TOKEN: "token" };
+    const local = loadConfig(env);
+    expect(local.storageBackend).toBe("sqlite");
+    expect(local.role).toBe("all");
+    expect(local.workerConcurrency).toBe(1);
+    expect(local.maxInboxJobs).toBe(100_000);
+    expect(local.maxWorkAttempts).toBe(5);
+    expect(local.namespace).toMatch(/^[a-f0-9]{32}$/);
+    const remote = loadConfig({ ...env, AUTOMOD_BACKEND: "postgres", AUTOMOD_ROLE: "worker", AUTOMOD_DATABASE_URL: "postgresql://automod:test-password@db/automod", WORKER_CONCURRENCY: "4" });
+    expect(remote.storageBackend).toBe("postgres");
+    expect(remote.role).toBe("worker");
+    expect(remote.workerConcurrency).toBe(4);
+    for (const changes of [
+      { AUTOMOD_BACKEND: "unknown" }, { AUTOMOD_BACKEND: "postgres" },
+      { AUTOMOD_ROLE: "worker" }, { WORKER_CONCURRENCY: "2" }, { MIN_ACTION_INTERVAL_MS: "0" },
+      { WORK_MAX_ATTEMPTS: "0" }, { WORK_LEASE_MS: "100" },
+    ]) {
+      expect(() => loadConfig({ ...env, ...changes })).toThrow();
+    }
+  });
 });
