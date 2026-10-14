@@ -4,6 +4,8 @@ Automod は Docker に依存していないため、Misskey と同じ Linux ホ�
 
 以下は一般的な Linux 配置例です。既存のディレクトリ構成、Bun の場所、Misskey の待受アドレスに合わせて変更してください。
 
+同じunitをAutomod専用ホストにも配置できます。同居・別ホストの選択、設定サンプル、移行手順、規模に関する制約は [配置ガイド](deployment.md) を参照してください。
+
 ## 1. ビルド
 
 運用ホストまたは同等のビルド環境で、テストとビルドを実行します。
@@ -38,6 +40,8 @@ sudo install -o crafters-automod -g crafters-automod -m 0600 \
 ## 3. 環境ファイル
 
 `/etc/crafters-automod.env` を root 所有、モード `0600` で作成します。アクセストークンを unit ファイルやリポジトリへ書かないでください。
+
+[同居用サンプル](../deploy/systemd/same-host.env.example)と[別ホスト用サンプル](../deploy/systemd/separate-host.env.example)も利用できます。どちらもトークンなどを実際の値へ変更し、初回は `dry-run` で起動してください。
 
 ```ini
 MISSKEY_URL=http://127.0.0.1:3000
