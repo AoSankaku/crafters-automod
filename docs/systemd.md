@@ -25,6 +25,7 @@ sudo install -d -o root -g root -m 0755 /opt/crafters-automod
 sudo install -d -o root -g root -m 0755 /opt/crafters-automod/dist
 sudo install -d -o crafters-automod -g crafters-automod -m 0700 /var/lib/crafters-automod
 sudo install -o root -g root -m 0644 dist/index.js /opt/crafters-automod/dist/index.js
+sudo install -o root -g root -m 0644 dist/cli.js /opt/crafters-automod/dist/cli.js
 sudo install -o root -g root -m 0644 README.md /opt/crafters-automod/README.md
 ```
 
@@ -47,6 +48,9 @@ sudo install -o crafters-automod -g crafters-automod -m 0600 \
 MISSKEY_URL=http://127.0.0.1:3000
 MISSKEY_TOKEN=replace-with-a-moderator-token
 AUTOMOD_MODE=dry-run
+AUTOMOD_BACKEND=sqlite
+AUTOMOD_ROLE=all
+WORKER_CONCURRENCY=1
 T2_ROLE_ID=
 LLM_REVIEW_DELAY_MS=900000
 AUTOMOD_DATA_DIR=/var/lib/crafters-automod
@@ -95,7 +99,7 @@ sudo journalctl -u crafters-automod.service -f
 curl --fail http://127.0.0.1:8787/health
 ```
 
-Streaming 接続中はヘルスチェックが HTTP 200、切断・再接続中は HTTP 503 になります。ログは journald に JSON Lines として出力されます。必要に応じて journald の保存上限を設定してください。
+単体・ingestではDBとStreaming、workerではDBと処理ループが稼働中ならHTTP 200になります。必要な接続の切断は503です。`queue.pending`と最古の待機時刻、`queue.dead`、API待機期限も監視してください。ログはjournaldにJSON Linesで出力されます。
 
 ## 6. 更新と停止
 
@@ -103,6 +107,7 @@ Streaming 接続中はヘルスチェックが HTTP 200、切断・再接続中�
 
 ```sh
 sudo install -o root -g root -m 0644 dist/index.js /opt/crafters-automod/dist/index.js
+sudo install -o root -g root -m 0644 dist/cli.js /opt/crafters-automod/dist/cli.js
 sudo systemctl restart crafters-automod.service
 ```
 
@@ -121,7 +126,13 @@ MemoryMax=256M
 CPUQuota=25%
 ```
 
-キュー件数が増えると起動時のメモリ使用量も増えるため、制限追加後は `systemctl status`、`journalctl`、`systemd-cgtop` でOOMや再起動ループがないことを確認してください。
+キューはDBに保持し、メモリには保存待ちと実行中のケースを制限付きで保持します。制限追加後は`systemctl status`、`journalctl`、`systemd-cgtop`でOOMや再起動ループがないことを確認してください。DB容量とバックアップも監視します。
+
+## 分散構成と管理CLI
+
+PostgreSQL構成は同じunitの環境設定を`ingest`または`worker`へ変更して別ホストで実行できます。同一ホストで複数unitを動かす場合はunit名・環境ファイル・ヘルスポートを分けてください。全プロセスで同じDB、namespace、ルール、動作モード、API間隔を使用します。詳細とSQLiteからの停止移行は[配置ガイド](deployment.md)を参照してください。
+
+管理CLIは`/opt/crafters-automod/dist/cli.js`です。サービスと同じ環境変数を安全に読み込む管理用実行環境から、`bun /opt/crafters-automod/dist/cli.js status`、`override --scope user --id USER_ID --reason REASON`、停止移行時の`migrate`を実行します。systemdの`EnvironmentFile`は通常のシェル構文とは異なるため、そのまま`source`しないでください。トークンやDB URLをコマンド履歴へ直接書かないでください。
 
 ## 現在の機能境界
 

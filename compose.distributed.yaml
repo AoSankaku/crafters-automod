@@ -1,0 +1,51 @@
+x-automod: &automod
+  build: .
+  restart: unless-stopped
+  env_file: .env
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+x-environment: &environment
+  AUTOMOD_BACKEND: postgres
+  AUTOMOD_DATABASE_URL: postgresql://automod:${AUTOMOD_POSTGRES_PASSWORD:?set AUTOMOD_POSTGRES_PASSWORD}@postgres:5432/automod
+  AUTOMOD_NAMESPACE: ${AUTOMOD_NAMESPACE:-misskey-production}
+  HEALTH_HOST: 0.0.0.0
+  HEALTH_PORT: 8787
+
+services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: automod
+      POSTGRES_USER: automod
+      POSTGRES_PASSWORD: ${AUTOMOD_POSTGRES_PASSWORD:?set AUTOMOD_POSTGRES_PASSWORD}
+    volumes:
+      - automod-postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U automod -d automod"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  ingest:
+    <<: *automod
+    environment:
+      <<: *environment
+      AUTOMOD_ROLE: ingest
+      WORKER_CONCURRENCY: 1
+    ports:
+      - "127.0.0.1:8787:8787"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  worker:
+    <<: *automod
+    environment:
+      <<: *environment
+      AUTOMOD_ROLE: worker
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+    # 固定ホストポートを公開しないため、--scale worker=N を使用できます。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+volumes:
+  automod-postgres:

@@ -4,7 +4,7 @@ Misskey のローカルタイムラインを監視し、人間が記述した `r
 
 詳細な設計と現在の実装境界は [docs/architecture.md](docs/architecture.md) を参照してください。
 
-小規模ではMisskeyと同じホストの独立サービスとして、リソースを分離したい場合は別ホストで実行できます。[同居・別ホストの配置と移行手順](docs/deployment.md)に設定例を用意しています。別ホスト化によるリソース分離と、複数ワーカーでの分散処理は別で、後者は未実装です。
+小規模ではMisskeyと同じホストで、Bun内蔵SQLiteと1プロセスだけで実行できます。大規模ではAutomod専用PostgreSQLを共有し、受信と複数ワーカーを別ホストへ分離できます。[同居・分散配置と移行手順](docs/deployment.md)に設定例を用意しています。
 
 ## 判定モデル
 
@@ -31,7 +31,7 @@ Automod（LLMなしで即時分類）
 
 ## 現在の実装範囲
 
-静的分類、永続監査ログ、T1 の凍結、T2 のロール付与、T2/T3 の遅延監査ジョブ、操作直前の人間オーバーライド確認まで実装済みです。
+静的分類、SQLite/PostgreSQLの永続受信キューと監査、ノートIDによる共有重複防止、リース付きワーカーとユーザー単位排他、T1凍結、T2ロール付与、T2/T3遅延監査ジョブ、人間判断の再確認、共有APIレート制御と429待機、有限回の遅延再試行を実装しています。本文は受信時に分類し、キューには本文を含まない固定の判定結果だけを保存します。
 
 次の2つは安全上、キューへの永続化までで、ワーカーはまだ接続していません。
 
@@ -98,7 +98,13 @@ Dockerは必須ではありません。Misskeyをsystemdで運用している場
 
 ## 人間による優先判断
 
-`data/human-overrides.json` は各操作の直前に再読込されます。人間がすでに判断したケースやユーザーを登録すると、自動処理を中止します。JSON が壊れている場合も安全のため処理を中止します。
+SQLite単体構成では`data/human-overrides.json`を各操作の直前に再読込します。共有DBへ判断を登録するCLIも両構成で利用できます。人間判断があるケースやユーザーは自動処理を中止します。オーバーライドファイルが壊れている場合も安全側に停止します。
+
+```sh
+bun run override --scope user --id USER_ID --reason "Moderator resolved the case"
+```
+
+分散構成では必ずこのCLIを使い、全プロセスで同じDBとnamespaceを指定します。Misskey管理画面の変更を自動同期する機能は未実装です。
 
 ```json
 {
@@ -108,9 +114,21 @@ Dockerは必須ではありません。Misskeyをsystemdで運用している場
 }
 ```
 
-監査ログは `data/audit.jsonl`、遅延監査ジョブは `data/llm-review-queue.jsonl`、T1 削除ジョブは `data/t1-purge-queue.jsonl` に保存されます。本文やアクセストークンは保存しません。各キューは `MAX_QUEUED_JOBS`（既定10万件）で上限を設け、到達時はディスクを無制限に消費せず安全側に失敗します。
+受信ケース、監査、遅延レビュー・削除ジョブ、完了ID、操作ジャーナル、人間判断、API予算を同じDBへ保存します。既定は`data/automod.sqlite`です。旧JSONLはSQLite初回起動時に取り込み、元ファイルも残します。本文やトークンは保存しません。
 
-受信ノートは1件ずつ処理し、処理中を含め `MAX_PENDING_NOTES`（既定1,000件）までメモリに保持します。上限を超えたノートは受け付けず、ノートIDと理由を警告ログに残します。自動再取得はないため、運用時はヘルスチェックの `noteProcessing.rejected` を監視してください。終了時は新規受付を止め、受け付け済みの処理を完了してからヘルスチェックを閉じます。
+`MAX_INBOX_JOBS`（既定10万件）は未完了・処理中・deadの合計上限、`MAX_QUEUED_JOBS`はレビュー・削除キューそれぞれの上限です。`MAX_PENDING_NOTES`（既定1,000件）はDB保存待ちのメモリ上限で、到達や保存失敗時には受信を停止します。保存済みケースは再起動後に再開し、完了IDは重複防止用に保持します。監査・完了IDの自動アーカイブは未実装なので、DB総容量は別途監視してください。
+
+大規模構成の例:
+
+```ini
+AUTOMOD_BACKEND=postgres
+AUTOMOD_DATABASE_URL=postgresql://automod:replace-password@db.internal:5432/automod
+AUTOMOD_NAMESPACE=misskey-production
+AUTOMOD_ROLE=worker
+WORKER_CONCURRENCY=4
+```
+
+同じ設定で`AUTOMOD_ROLE=ingest`の受信プロセスを配置します。新規Docker構成では`docker compose -f compose.distributed.yaml up -d --build --scale worker=2`も使用できます。既存SQLiteからの移行は全Automodを停止して`bun run migrate`で実施します。詳細は[配置ガイド](docs/deployment.md)を参照してください。
 
 ## ルールを更新する手順
 
@@ -148,9 +166,9 @@ bun run build
 curl http://127.0.0.1:8787/health
 ```
 
-Streaming 接続中は HTTP 200 と `"status":"ok"`、切断・再接続中は HTTP 503 と `"status":"degraded"` を返します。ログは JSON Lines 形式で、アクセストークンやノート本文は出力しません。
+必要なDB・ワーカー・Streamingが稼働中ならHTTP 200、必要な接続がない場合は503を返します。worker専用ロールはStreaming接続を要求しません。`queue`の待機・実行・dead・完了数、両ジョブ数、最古の待機時刻、API待機期限と、`noteProcessing`のDB保存待ち・拒否・失敗数を監視してください。HTTP 200だけでは処理の追従を保証しません。`bun run status`でもDBの状態を確認できます。
 
-`noteProcessing` には処理中・待機中の合計 `pending`、上限 `capacity`、起動後の累計拒否数 `rejected`、累計処理失敗数 `failed` を返します。ヘルスチェックの待受に失敗した場合は起動を中止します。
+`MIN_ACTION_INTERVAL_MS`（既定1100ms）は認証・照会・制裁の全API呼び出しで共有します。429では全ワーカーに待機を適用します。結果不明の制裁は再送せず`automation.skipped.uncertain`を記録します。実際のMisskeyでの動作・負荷検証は未実施です。
 
 ## 安全な導入手順
 

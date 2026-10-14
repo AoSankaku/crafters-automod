@@ -1,86 +1,117 @@
-# 同居配置と別ホスト配置
+# 同居配置と分散配置
 
-Automod は Misskey の HTTP API と WebSocket に接続する独立サービスです。小規模では Misskey と同じ Linux ホストで動かし、リソース競合が増えたら Automod 専用ホストへ移せます。Misskey のプロセスへの組み込みや、Misskey のデータベース・Redis・ストレージへの直接アクセスは、現在の機能には必要ありません。
+小規模ではMisskeyと同じホストで、Bun内蔵SQLiteを使うAutomod 1プロセスを動かせます。追加のDBサーバーは不要です。大規模ではAutomod専用のPostgreSQLに状態を共有し、受信プロセスと複数の処理ワーカーを別ホストへ配置できます。MisskeyのDB・Redisへ直接アクセスする必要はありません。
 
-両配置で同じビルド成果物を使います。配置を切り替える専用のモード設定は不要で、接続先は `MISSKEY_URL`、状態の保存先は `AUTOMOD_DATA_DIR` で指定します。`AUTOMOD_MODE` は配置ではなく、`dry-run` / `enforce` の処理動作を選ぶ設定です。
-
-## 配置の選択
-
-| 配置 | 主な用途 | Misskey への接続例 | 現在の実行単位 |
+| 構成 | 設定 | 保存先 | プロセス |
 |---|---|---|---|
-| 同居 | Misskey とリソースを共有できる小規模運用 | `http://127.0.0.1:3000` | 独立した Automod 1プロセス |
-| 別ホスト | Misskey とのCPU・メモリ・ディスクの競合を避ける運用 | `https://misskey.example` | 専用ホスト上の Automod 1プロセス |
+| 小規模・同居 | `AUTOMOD_BACKEND=sqlite`（既定） | `AUTOMOD_DATA_DIR/automod.sqlite` | `AUTOMOD_ROLE=all`、並列数1 |
+| 別ホスト・単体 | 同上 | 専用ホストのSQLite | `all` |
+| 大規模・分散 | `AUTOMOD_BACKEND=postgres` | Automod専用PostgreSQL | `ingest` と `worker`、または `all` |
 
-登録ユーザー数だけで切替基準は決まりません。投稿頻度、ルール数、API呼び出しの頻度・応答時間、監査データ量を実測して判断してください。検証済みの処理件数上限や必要メモリ量はまだありません。
+同じMisskeyに接続する全プロセスで、`MISSKEY_URL`、トークンのアカウント、`AUTOMOD_NAMESPACE`、ルール生成物、`AUTOMOD_MODE`、`T2_ROLE_ID`、キュー上限、再試行設定、`MIN_ACTION_INTERVAL_MS`を統一してください。namespaceが異なると重複防止もAPI予算も共有されません。未指定のnamespaceは正規化したURLのSHA-256先頭32文字です。URL変更時も既存namespaceを引き継いでください。
 
-## 小規模: 同じ Linux ホストに置く
+## 小規模: Misskeyとの同居
 
-[systemd の運用手順](systemd.md)に従って、専用ユーザー、コード、永続データ、unit を配置します。環境ファイルには [同居用サンプル](../deploy/systemd/same-host.env.example)を使えます。
+`.env.example`を`.env`へコピーし、URLとトークンを設定します。
 
-```sh
-sudo install -o root -g root -m 0600 \
-  deploy/systemd/same-host.env.example /etc/crafters-automod.env
-sudoedit /etc/crafters-automod.env
+```ini
+MISSKEY_URL=http://127.0.0.1:3000
+MISSKEY_TOKEN=replace-with-a-moderator-token
+AUTOMOD_BACKEND=sqlite
+AUTOMOD_ROLE=all
+AUTOMOD_MODE=dry-run
+WORKER_CONCURRENCY=1
+AUTOMOD_DATA_DIR=data
 ```
 
-`MISSKEY_URL` を実際の待受URLに、`MISSKEY_TOKEN` を専用アカウントのトークンに変更します。`enforce` で有効なT2ルールを使う場合は `T2_ROLE_ID` も設定します。最初は `dry-run` で接続、分類、監査ログを確認してください。
-
-Misskey と Automod は別ユーザー・別サービスとして実行します。Automod の書き込み先は `/var/lib/crafters-automod` です。CPU・メモリ制限を設定する場合は実測後に調整し、Misskey の応答時間と Automod の待機件数を確認してください。
-
-Misskey がループバックで待ち受けていない場合は、同居でも公開HTTPS URLなどを利用できます。API と WebSocket の両方へ接続できる必要があります。
-
-## リソース分離: 別ホストに置く
-
-Automod 専用ホストに、同じ Bun ランタイム、ビルド成果物、systemd unit を配置します。[別ホスト用サンプル](../deploy/systemd/separate-host.env.example)を環境ファイルとして使用します。
-
 ```sh
-sudo install -o root -g root -m 0600 \
-  deploy/systemd/separate-host.env.example /etc/crafters-automod.env
-sudoedit /etc/crafters-automod.env
+bun run build
+bun start
 ```
 
-`MISSKEY_URL` を対象Misskeyの実際のHTTPS URLに変更します。専用ホストからAPIとWebSocketへ到達でき、経路上のリバースプロキシがWebSocket接続を通す必要があります。WebSocketの接続方法は [Misskey公式Streaming API仕様](https://misskey-hub.net/en/docs/for-developers/api/streaming/)も参照してください。
+[systemdの手順](systemd.md)と[同居用環境ファイル](../deploy/systemd/same-host.env.example)も使用できます。Misskeyと別サービス・専用ユーザーで動かしてください。SQLiteはローカルディスクに置き、NFSや複数ホストで共有せず、1プロセスで使用します。WALとFULL同期で、保存済みの未完了ケースを再起動後に再開します。
 
-接続は Automod 側から開始します。通常の動作のために、MisskeyからAutomodへの受信用APIを公開する必要はありません。ヘルスチェックはサンプルどおり `127.0.0.1:8787` に置き、必要に応じて専用ホスト内の監視エージェントで確認します。
+Dockerは既存の`compose.yaml`を使います。
 
-監査ログ、ジョブキュー、人間オーバーライドは専用ホストの `AUTOMOD_DATA_DIR` に保存します。現在のJSONL永続化は単一プロセスを前提としており、複数ホストが同じファイルを共有して処理する構成には対応していません。
+```sh
+docker compose up -d --build
+```
 
-## Docker を使う場合
+コンテナ内の`127.0.0.1`はコンテナ自身です。同じDockerネットワークなら`http://misskey:3000`などのサービス名、ホストなら到達可能な`http://host.docker.internal:3000`やHTTPS URLを使用します。ホストのMisskeyがループバックのみで待つ場合は、host-gatewayから到達できません。`./data:/app/data`を永続化し、コンテナから書き込める所有者・権限にしてください。
 
-既存の [compose.yaml](../compose.yaml) は、同居・別ホストのどちらにも利用できます。リポジトリ直下の `.env` に接続先を設定し、`./data` を永続化します。上記のsystemd用環境ファイルは絶対パスを含むため、そのままコンテナ用に流用せず [.env.example](../.env.example) を使ってください。
+## 大規模: PostgreSQLと受信・処理の分離
 
-| Misskey の配置 | `MISSKEY_URL` の例・条件 |
-|---|---|
-| Automodコンテナと同じホストのホストOS上 | `http://host.docker.internal:3000`。ホストゲートウェイから到達できる待受設定が必要 |
-| 同じDockerネットワークの別コンテナ | `http://misskey:3000`。サービス名とネットワークを実際の構成に合わせる |
-| 別ホスト | `https://misskey.example` |
+Bun内蔵SQLクライアントを利用し、追加のnpm依存やRedisは不要です。検証にはPostgreSQL 18.6を使用しています。DBはMisskeyのスキーマと分け、Automod専用DB・ユーザーを用意します。別ホスト間ではDB接続のTLSとアクセス制限を設定してください。
 
-コンテナ内の `127.0.0.1` は Automod コンテナ自身を指します。ホストのMisskeyがループバックのみで待ち受けている場合、`host.docker.internal` への変更だけでは接続できないことがあります。その場合は到達できる公開HTTPS URLなどを使ってください。
+```ini
+MISSKEY_URL=https://misskey.example
+MISSKEY_TOKEN=replace-with-a-moderator-token
+AUTOMOD_BACKEND=postgres
+AUTOMOD_DATABASE_URL=postgresql://automod:replace-password@db.internal:5432/automod
+AUTOMOD_NAMESPACE=misskey-production
+AUTOMOD_ROLE=ingest
+AUTOMOD_MODE=dry-run
+MIN_ACTION_INTERVAL_MS=1100
+```
 
-Composeの `./data:/app/data` を使う場合、コンテナ内の `AUTOMOD_DATA_DIR` は既定の `data` または `/app/data` とします。`HEALTH_HOST=0.0.0.0` とすれば、既存のホスト側ループバックへのポート公開設定で監視できます。
+処理ホストでは同じ設定を使い、`AUTOMOD_ROLE=worker`、`WORKER_CONCURRENCY=4`などを指定します。各プロセスで`bun start`を実行します。複数ワーカーは同じDBからリース付きで取得し、同じユーザーへの同時処理を防ぎます。受信プロセスを複数起動した場合も同じノートIDは1ケースになります。
 
-## 同居から別ホストへ移す手順
+Dockerの新規分散構成例は`compose.distributed.yaml`です。`.env`に設定した`AUTOMOD_POSTGRES_PASSWORD`にはURL中でも安全な十分長い英数字を使います（例: ランダムな64桁の16進数）。この例はDBをホストのポートへ公開しません。
 
-1. 新ホストに同じルールを含むビルド成果物を配置し、unit と環境ファイルを準備する。この時点では自動起動しない。
-2. 旧ホストの Automod を停止し、停止完了を確認する。Misskey 自体を停止する必要はない。
-3. 旧ホストの `AUTOMOD_DATA_DIR` 全体を新ホストへ安全に転送し、専用ユーザーが読み書きできる所有者・権限にする。監査ログ、キュー、人間オーバーライドを引き継ぐ。
-4. 新ホストの接続URLと保存先を確認し、`dry-run` で起動する。ヘルスチェック、監査ログ、キュー件数を確認する。
-5. 確認後、必要に応じて `enforce` へ変更して再起動する。旧ホストは自動起動を解除し、同時稼働させない。
+```sh
+docker compose -f compose.distributed.yaml up -d --build --scale worker=2
+docker compose -f compose.distributed.yaml logs -f ingest worker
+```
 
-現在の受信キューはメモリ上にあり、Streaming は停止・切断中の投稿を再取得しません。この移行は取りこぼしゼロを保証しません。複数インスタンスの同時稼働による無停止移行も、分散重複防止がないため想定していません。
+`ingest`のヘルスはホストの`127.0.0.1:8787`、workerは各コンテナ内の8787で確認します。workerは固定ホストポートを持たず複数起動できます。別マシンへ増設する場合は、同じPostgreSQLへ接続するworkerを配置してください。Docker例のPostgreSQL 18のボリューム配置は[公式イメージ仕様](https://hub.docker.com/_/postgres)に従っています。Docker実行自体はこの開発環境では未検証です。
 
-## 大規模運用で追加設計が必要な範囲
+## 既存データの移行
 
-別ホスト化はリソース分離として利用できますが、処理能力を複数台へ分散する機能はまだありません。現在は次の制約があります。
+旧JSONL形式はSQLite単体起動時に自動取り込みします。完了ケース、監査、人間判断、レビュー・削除ジョブを引き継ぎ、元ファイルは残します。壊れた行や未知のフィールドは黙って捨てず起動を止めます。エラーを修復して再起動すれば、取り込み済みの行は重複しません。
 
-- ノート処理は直列で、処理中を含む既定1,000件を超えた受信ノートは拒否され、自動再取得されません。
-- 監査ログとジョブキューはローカルJSONLです。監査ログのローテーション・保持期間管理と、完了ケース索引のメモリ削減は未実装です。
-- 各永続キューは既定10万ジョブで上限に達します。LLM監査・過去投稿削除ワーカーは未接続で、自動消費されません。
-- リアルタイムAPI操作には自前のレート制御と自動再試行スケジューラがありません。`MIN_ACTION_INTERVAL_MS` は現在のリアルタイム処理には適用されません。
-- `localTimeline` に届かない公開範囲や停止・切断中の投稿は検査できません。
+SQLiteからPostgreSQLへ切り替えるときは、次の順序で行います。
 
-処理待ち `noteProcessing.pending` の継続的な増加、`rejected` の増加、API失敗の監査記録を確認してください。`failed` は処理中に外へ伝播した例外の件数であり、すべてのAPI操作失敗を網羅するものではありません。HTTP 200はStreaming接続中であることを示し、処理の追従や監査ワーカーの動作まで保証しません。
+旧版のJSONLしかなく`automod.sqlite`がまだ存在しない場合は、先に新バージョンをSQLite構成で一度起動し、自動取り込み後に停止してください。その後、以下の停止移行を行います。
 
-単一プロセスで追従できない規模には、再開可能な永続受信キュー、共有状態と分散重複防止、ユーザー単位の操作直列化、全体で共有するAPIレート制御、保持期間管理が必要です。全投稿を検査する場合は、Misskey側に信頼できる投稿イベント連携も追加する設計になります。
+1. 全Automodの受信・処理プロセスを停止する。Misskey本体は停止不要。
+2. `AUTOMOD_DATA_DIR`全体をバックアップする。SQLiteのWAL/SHMが残る場合も含める。移行元を再稼働させない。
+3. 新しいビルドを作り、移行元ディレクトリと**既存と同じnamespace**を指定する。接続URLを変更する場合は旧URLから生成されたnamespaceを明示する。
+4. `AUTOMOD_BACKEND=postgres`と移行先DB URLを設定し、未使用の移行先namespaceに対して`bun run migrate`を実行する。
+5. 成功後に`bun run status`で件数を確認し、受信とworkerを同じ設定で起動する。移行前と同じルール・動作モードで残存ケースを処理する。
 
-同居・別ホストとも、実際のMisskeyサーバーでの稼働・負荷検証はまだ行っていません。配置方法だけで、未接続のLLM監査や過去投稿全削除が有効になることはありません。
+```sh
+bun run build
+bun run migrate
+bun run status
+```
+
+完了ID、監査、未処理ケース、両ジョブキュー、人間オーバーライド、制裁ジャーナル、APIクールダウンを転送します。`human-overrides.json`も移行元DBへ反映してからコピーします。実行中だったケースは古いリースを捨てて再処理待ちへ戻します。通信・プロセス停止で中断した移行は同じ移行元から再実行できます。件数とダイジェストを検証し、移行完了まで移行先での通常処理を禁止します。使用済みnamespaceへの混在を拒否します。待機期限は絶対時刻で引き継ぐため、移行元・先の時刻をNTP等で同期してください。移行後に旧SQLiteへ単純に戻すと判断履歴が分岐するため、旧プロセスの自動起動も解除してください。
+
+SQLiteのまま別ホストへ移す場合も全プロセスを止め、データディレクトリ全体と同じnamespace・設定を転送します。
+
+## 人間の判断とルール更新
+
+分散構成の人間判断は、全プロセスが使う共有DBへ登録します。ビルド済みCLIを同じ環境設定で実行してください。
+
+```sh
+bun run override --scope user --id USER_ID --reason "Moderator resolved the case"
+bun run override --scope case --id NOTE_ID --reason "Human decision"
+```
+
+`case`、`note`、`user`に対応します。操作を取り消すコマンドではなく、以後の自動変更を禁止する判断です。SQLite構成では従来の`human-overrides.json`も操作直前に再読込します。PostgreSQL構成ではローカルファイルを共有しないため、必ずCLIで登録してください。Misskey管理画面の操作が自動的にこのDBへ同期される機能はありません。人間が処置する前にオーバーライドを登録し、必要な復元はMisskey側で実施してください。
+
+ルールや`dry-run/enforce`を切り替える際は受信を止め、旧設定のworkerで未完了ケースを処理してから全プロセスを同時に更新します。ポリシーハッシュ・モードが違うケースは誤った制裁を避けるためdeadへ移り、自動再解釈しません。dry-runで受け付けた同じノートIDをenforceで再制裁することもありません。
+
+## 監視と限界
+
+`/health`の`queue`には`pending`、`running`、`dead`、`completed`、`reviewJobs`、`purgeJobs`、`oldestPendingAt`、`apiRequests`、`apiBlockedUntil`を返します。`noteProcessing`はDB保存待ち、受理・重複・拒否・失敗数、`worker`は稼働中・完了・失敗・リース喪失数です。`bun run status`でもDBの件数を確認できます。
+
+- `MAX_INBOX_JOBS`はpending/running/dead合計の上限（既定10万）。deadも枠を消費し、黙って消去しません。到達・保存失敗・保存待ちメモリ上限では受信を停止し、監督プロセスに失敗を返します。
+- `WORK_MAX_ATTEMPTS`（既定5）で再試行を制限し、指数バックオフ後も失敗するケースはdeadに保存します。DBから消さず人間が監査・判断してください。自動dead再投入はありません。
+- APIの最小間隔（既定1100ms）は認証・ユーザー照会・制裁の全呼び出しに適用します。429の`Retry-After`を最大1時間まで共有して待ちます。ワーカーを増やしてもこの予算は増えません。
+- 長いAPI待機でユーザー照会結果が古くなった場合は、制裁を送らず再試行へ戻します。照会から変更までの競合時間は残るため、人間が処置する際は先に共有オーバーライドを登録してください。
+- HTTP操作をMisskeyのDBと同じトランザクションにはできません。送信結果が不明な制裁は`automation.skipped.uncertain`として監査し、再制裁やT1削除を行わず人間確認へ回します。API送信後の人間操作やリース失効を完全に原子的に遮断するにはMisskey側の条件付き管理APIが必要です。
+- 完了IDと監査は保持し続けます。重複防止の保持期間・監査の自動アーカイブは未実装なので、DB容量・バックアップ・監査保持方針を管理してください。ジョブ数制限はDB総バイト数の制限ではありません。
+- LLMレビューと過去投稿全削除のワーカーは未接続です。キューは各`MAX_QUEUED_JOBS`まで蓄積します。
+
+永続化の保証はDBへの保存成功後からです。`localTimeline`には再送確認・遡及取得がなく、切断・停止・保存前の障害や上限超過時の投稿、Home/フォロワー限定/ダイレクト投稿は網羅できません。全件保証にはMisskey側の信頼できる永続イベント連携が別途必要です。実Misskeyでの稼働・負荷試験は未実施で、登録ユーザー数による規模の境界もまだ測定していません。
