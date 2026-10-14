@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -398,12 +399,21 @@ describe("durable moderation store (SQLite)", () => {
     expect(restored.attempts).toBe(2);
   });
 
-  test("requireExisting rejects a missing namespace instead of initializing an empty source", async () => {
-    const { open } = await fixture();
+  test("requireExisting reopens a real namespace and rejects missing sources without creating files", async () => {
+    const { open, directory } = await fixture();
     const existing = await open({ namespace: "existing" });
+    await existing.enqueue(envelope("seeded-source-note"));
     await existing.close();
     stores.splice(stores.indexOf(existing), 1);
     await expect(open({ namespace: "missing", requireExisting: true })).rejects.toBeInstanceOf(StorageError);
+
+    const reopened = await open({ namespace: "existing", requireExisting: true });
+    expect(await reopened.stats()).toMatchObject({ pending: 1 });
+
+    const nonexistentPath = join(directory, "must-not-be-created.sqlite");
+    await expect(createStore({ sqlitePath: nonexistentPath, namespace: "missing", requireExisting: true }))
+      .rejects.toBeInstanceOf(StorageError);
+    expect(existsSync(nonexistentPath)).toBe(false);
   });
 
   test("rejects migration namespace/schema mismatches and non-empty destinations", async () => {

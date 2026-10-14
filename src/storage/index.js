@@ -291,7 +291,10 @@ export async function createStore(options = {}) {
 
     if (backend === "sqlite") {
       const sqlitePath = requiredString(options.sqlitePath, "SQLite path");
-      database = new Database(sqlitePath, { create: !requireExisting });
+      database = new Database(sqlitePath, {
+        create: !requireExisting,
+        readwrite: true,
+      });
       if (requireExisting) database.exec("PRAGMA busy_timeout = 5000;");
       else database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000;");
       options.sqliteMutex = sqliteMutex(sqlitePath === ":memory:" ? randomUUID() : resolvePath(sqlitePath));
