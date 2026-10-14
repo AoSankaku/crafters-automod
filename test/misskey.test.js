@@ -67,6 +67,106 @@ describe("MisskeyApiClient", () => {
       roleId: "restricted-role",
     });
   });
+
+  test("waits for the shared API budget before rechecking authority and fetching", async () => {
+    const calls = [];
+    let humanDecision = false;
+    const rateLimiter = {
+      acquire: mock(async (receivedSignal) => {
+        calls.push("acquire");
+        humanDecision = true;
+        expect(receivedSignal).toBe(signal);
+      }),
+      penalize: mock(async () => undefined),
+    };
+    const fetchImpl = mock(async () => {
+      calls.push("fetch");
+      return Response.json({});
+    });
+    const client = new MisskeyApiClient({
+      baseUrl: "https://misskey.example",
+      token: "token",
+      fetchImpl,
+      rateLimiter,
+    });
+    const signal = new AbortController().signal;
+
+    await expect(client.suspendUser("user-1", {
+      signal,
+      beforeRequest: async () => {
+        calls.push("authority");
+        if (humanDecision) throw new Error("human decision appeared");
+      },
+    })).rejects.toThrow("human decision appeared");
+
+    expect(calls).toEqual(["acquire", "authority"]);
+    expect(rateLimiter.acquire).toHaveBeenCalledWith(signal);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test("applies Retry-After to the shared limiter and never retries a rejected mutation", async () => {
+    const rateLimiter = {
+      acquire: mock(async () => undefined),
+      penalize: mock(async () => undefined),
+    };
+    const fetchImpl = mock(async () =>
+      new Response(JSON.stringify({ error: { code: "RATE_LIMIT", message: "secret-token body" } }), {
+        status: 429,
+        headers: { "Retry-After": "3" },
+      }),
+    );
+    const client = new MisskeyApiClient({
+      baseUrl: "https://misskey.example",
+      token: "secret-token",
+      fetchImpl,
+      rateLimiter,
+    });
+
+    await expect(client.suspendUser("user-1")).rejects.toMatchObject({
+      name: "MisskeyApiError",
+      status: 429,
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(rateLimiter.penalize).toHaveBeenCalledWith("3");
+  });
+
+  test("keeps transport and malformed JSON errors from exposing tokens or response bodies", async () => {
+    const transportClient = new MisskeyApiClient({
+      baseUrl: "https://misskey.example",
+      token: "secret-token",
+      fetchImpl: async () => {
+        throw new Error("secret-token remote response body");
+      },
+    });
+    await expect(transportClient.getMe()).rejects.toThrow(/^(?!.*secret-token).*$/u);
+
+    const jsonClient = new MisskeyApiClient({
+      baseUrl: "https://misskey.example",
+      token: "secret-token",
+      fetchImpl: async () => new Response("secret-token malformed remote body", { status: 200 }),
+    });
+    await expect(jsonClient.getMe()).rejects.toThrow(/^(?!.*secret-token).*$/u);
+  });
+
+  test("passes the shared rate budget through read and mutation methods", async () => {
+    const rateLimiter = { acquire: mock(async () => undefined), penalize: mock(async () => undefined) };
+    const fetchImpl = mock(async () => Response.json({ isModerator: false, roleAssigns: [] }));
+    const client = new MisskeyApiClient({
+      baseUrl: "https://misskey.example",
+      token: "token",
+      fetchImpl,
+      rateLimiter,
+    });
+
+    await client.getMe();
+    await client.showUser("user-1");
+    await client.assignRole("user-1", "restricted-role");
+    await client.deleteNote("note-1");
+
+    expect(rateLimiter.acquire).toHaveBeenCalledTimes(4);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
 });
 
 describe("Misskey stream helpers", () => {

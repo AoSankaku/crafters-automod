@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 
-import { ModerationEnforcer } from "../src/enforcement.js";
+import { HumanDecisionError, ModerationEnforcer } from "../src/enforcement.js";
+import { MisskeyApiError } from "../src/misskey.js";
 
 function createHarness({
   humanDecision = false,
@@ -120,3 +121,187 @@ describe("ModerationEnforcer", () => {
     expect(logger.error).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("ModerationEnforcer mutation safety and restart journal", () => {
+  test("rechecks human authority after the API wait and skips the mutation", async () => {
+    let humanDecision = false;
+    const harness = createSafeHarness({ hasHumanDecision: () => humanDecision });
+    harness.moderator.suspendUser.mockImplementation(async (_userId, options) => {
+      // This represents the wait for a shared API slot. The decision arrives during that wait.
+      humanDecision = true;
+      await options.beforeRequest();
+      harness.events.push("suspend");
+    });
+
+    expect(await harness.enforcer.enforceT1(harness.moderationCase)).toBe(true);
+
+    expect(harness.authority.hasHumanDecision).toHaveBeenCalledTimes(2);
+    expect(harness.events).not.toContain("suspend");
+    expect(harness.purgeQueue.enqueue).not.toHaveBeenCalled();
+    expect(harness.record).toHaveBeenCalledWith("automation.skipped.human", harness.moderationCase, {
+      actor: "human",
+    });
+  });
+
+  test("rethrows a lost lease that occurs after waiting instead of returning retry success", async () => {
+    const lostLease = Object.assign(new Error("lease expired"), { code: "LEASE_LOST" });
+    const harness = createSafeHarness({ assertActive: mock(async () => { throw lostLease; }) });
+    harness.moderator.suspendUser.mockImplementation(async (_userId, options) => {
+      await options.beforeRequest();
+      harness.events.push("suspend");
+    });
+
+    await expect(harness.enforcer.enforceT1(harness.moderationCase)).rejects.toBe(lostLease);
+    expect(harness.events).not.toContain("suspend");
+    expect(harness.purgeQueue.enqueue).not.toHaveBeenCalled();
+    expect(harness.record.mock.calls.some(([type]) => type === "t1.enforcement.failed")).toBe(false);
+  });
+
+  test("does not repeat suspension when purge retry follows a completed mutation", async () => {
+    const harness = createSafeHarness();
+    harness.moderator.suspendUser.mockImplementation(async (_userId, options) => {
+      await options.beforeRequest();
+      harness.state.user.isSuspended = true;
+      harness.events.push("suspend");
+    });
+    harness.purgeQueue.enqueue
+      .mockRejectedValueOnce(new Error("purge queue unavailable"))
+      .mockResolvedValueOnce(undefined);
+
+    expect(await harness.enforcer.enforceT1(harness.moderationCase)).toBe(false);
+    expect(await harness.enforcer.enforceT1(harness.moderationCase)).toBe(true);
+
+    expect(harness.moderator.suspendUser).toHaveBeenCalledTimes(1);
+    expect(harness.purgeQueue.enqueue).toHaveBeenCalledTimes(2);
+    expect(harness.journal.get).toHaveBeenCalledWith("suspend");
+  });
+
+  test("holds an ambiguous started mutation for human review after restart", async () => {
+    const journal = createJournal({ suspend: { status: "started" } });
+    const harness = createSafeHarness({ journal });
+
+    expect(await harness.enforcer.enforceT1(harness.moderationCase)).toBe(true);
+
+    expect(harness.moderator.suspendUser).not.toHaveBeenCalled();
+    expect(harness.purgeQueue.enqueue).not.toHaveBeenCalled();
+    expect(harness.record).toHaveBeenCalledWith(
+      "automation.skipped.uncertain",
+      harness.moderationCase,
+      { actor: "deterministic" },
+    );
+  });
+
+  test("skips an automation-owned completed state that is no longer present", async () => {
+    const journal = createJournal({ suspend: { status: "completed" } });
+    const harness = createSafeHarness({ journal, user: { isSuspended: false } });
+
+    expect(await harness.enforcer.enforceT1(harness.moderationCase)).toBe(true);
+
+    expect(harness.moderator.suspendUser).not.toHaveBeenCalled();
+    expect(harness.purgeQueue.enqueue).not.toHaveBeenCalled();
+    expect(harness.record).toHaveBeenCalledWith(
+      "automation.skipped.human-state",
+      harness.moderationCase,
+      { actor: "deterministic" },
+    );
+  });
+
+  test("does not purge a preexisting suspension without a same-case completion journal", async () => {
+    const harness = createSafeHarness({ user: { isSuspended: true } });
+
+    expect(await harness.enforcer.enforceT1(harness.moderationCase)).toBe(true);
+
+    expect(harness.moderator.suspendUser).not.toHaveBeenCalled();
+    expect(harness.purgeQueue.enqueue).not.toHaveBeenCalled();
+  });
+
+  test("resets a started journal after a definitive 429 rejection", async () => {
+    const harness = createSafeHarness();
+    harness.moderator.suspendUser.mockImplementation(async (_userId, options) => {
+      await options.beforeRequest();
+      throw new MisskeyApiError("admin/suspend-user", 429, "RATE_LIMIT");
+    });
+
+    expect(await harness.enforcer.enforceT1(harness.moderationCase)).toBe(false);
+
+    expect(harness.journal.start).toHaveBeenCalledWith("suspend");
+    expect(harness.journal.reset).toHaveBeenCalledWith("suspend");
+    expect(harness.journal.complete).not.toHaveBeenCalled();
+  });
+
+  test("requires the completion journal before queuing T1 purge", async () => {
+    const harness = createSafeHarness({ user: { isSuspended: true } });
+    harness.journal = createJournal({ suspend: { status: "completed" } });
+    harness.enforcer.journal = harness.journal;
+    harness.authority.hasHumanDecision.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+
+    expect(await harness.enforcer.enforceT1(harness.moderationCase)).toBe(true);
+
+    expect(harness.purgeQueue.enqueue).not.toHaveBeenCalled();
+    expect(harness.record).toHaveBeenCalledWith("automation.skipped.human", harness.moderationCase, {
+      actor: "human",
+    });
+  });
+});
+
+function createSafeHarness({
+  journal = createJournal(),
+  assertActive = async () => undefined,
+  hasHumanDecision = () => false,
+  user = {},
+} = {}) {
+  const state = {
+    user: {
+      isModerator: false,
+      isAdministrator: false,
+      isSuspended: false,
+      roleAssigns: [],
+      ...user,
+    },
+  };
+  const events = [];
+  const moderator = {
+    showUser: mock(async () => ({ ...state.user })),
+    suspendUser: mock(async (_userId, options) => {
+      await options?.beforeRequest?.();
+      state.user.isSuspended = true;
+      events.push("suspend");
+    }),
+    assignRole: mock(async (_userId, _roleId, options) => {
+      await options?.beforeRequest?.();
+      events.push("assign-role");
+    }),
+  };
+  const purgeQueue = { enqueue: mock(async () => events.push("purge-enqueue")) };
+  const authority = { hasHumanDecision: mock(async () => hasHumanDecision()) };
+  const record = mock(async (type) => events.push(type));
+  const logger = { error: mock(() => undefined) };
+  const enforcer = new ModerationEnforcer({
+    record,
+    moderator,
+    purgeQueue,
+    authority,
+    logger,
+    t2RoleId: "restricted-role",
+    journal,
+    assertActive,
+  });
+  const moderationCase = {
+    caseId: "case-1",
+    noteId: "note-1",
+    userId: "user-1",
+    ruleIds: ["rule-1"],
+  };
+
+  return { authority, enforcer, events, journal, logger, moderationCase, moderator, purgeQueue, record, state };
+}
+
+function createJournal(initial = {}) {
+  const state = new Map(Object.entries(initial));
+  return {
+    get: mock(async (key) => state.get(key) ?? null),
+    start: mock(async (key) => state.set(key, { status: "started" })),
+    complete: mock(async (key) => state.set(key, { status: "completed" })),
+    reset: mock(async (key) => state.delete(key)),
+  };
+}
