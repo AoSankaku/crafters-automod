@@ -343,3 +343,40 @@ function createJournal(initial = {}) {
     reset: mock(async (key) => state.delete(key)),
   };
 }
+
+test("does not start a mutation journal while waiting for an API slot", async () => {
+  const h = createSafeHarness();
+  h.moderator.suspendUser.mockImplementation(async () => {
+    expect(h.journal.start).not.toHaveBeenCalled();
+    throw Object.assign(new Error("Lease lost before sending"), { code: "LEASE_LOST" });
+  });
+  await expect(h.enforcer.enforceT1(h.moderationCase)).rejects.toThrow(/Lease lost/);
+  expect(h.journal.start).not.toHaveBeenCalled();
+});
+
+test("rejects an aged user snapshot after a long rate-limit wait without starting a mutation", async () => {
+  const h = createSafeHarness();
+  let time = 0;
+  h.enforcer.clock = () => time;
+  h.enforcer.userStateMaxAgeMs = 5000;
+  h.moderator.assignRole.mockImplementation(async (_id, _roleId, options) => {
+    time = 6000;
+    await options.beforeRequest();
+    h.events.push("unexpected-mutation");
+  });
+  expect(await h.enforcer.enforceT2(h.moderationCase)).toBe(false);
+  expect(h.journal.start).not.toHaveBeenCalled();
+  expect(h.events).not.toContain("unexpected-mutation");
+});
+
+test("resets a start marker when journal latency makes preflight stale before fetch", async () => {
+  const h = createSafeHarness();
+  let time = 0;
+  h.enforcer.clock = () => time;
+  h.enforcer.userStateMaxAgeMs = 5000;
+  const originalStart = h.journal.start.getMockImplementation();
+  h.journal.start.mockImplementation(async (key) => { await originalStart(key); time = 6000; });
+  expect(await h.enforcer.enforceT1(h.moderationCase)).toBe(false);
+  expect(h.journal.reset).toHaveBeenCalledWith("suspend");
+  expect(h.events).not.toContain("suspend");
+});

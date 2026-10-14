@@ -16,6 +16,8 @@ export class ModerationEnforcer {
     assertActive = async () => {},
     journal,
     signal,
+    clock = () => performance.now(),
+    userStateMaxAgeMs = 5000,
   }) {
     this.record = record;
     this.moderator = moderator;
@@ -26,6 +28,8 @@ export class ModerationEnforcer {
     this.assertActive = assertActive;
     this.journal = journal ?? null;
     this.signal = signal;
+    this.clock = clock;
+    this.userStateMaxAgeMs = userStateMaxAgeMs;
   }
 
   async enforceT1(moderationCase) {
@@ -55,13 +59,9 @@ export class ModerationEnforcer {
       }
 
       if (!gate.user.isSuspended) {
-        if (this.journal) {
-          await this.startAction(actionKey);
-          actionStarted = true;
-        }
         await this.moderator.suspendUser(moderationCase.userId, {
           signal: this.signal,
-          beforeRequest: () => this.assertMutationAllowed(moderationCase),
+          beforeRequest: () => this.prepareMutation(moderationCase, gate, actionKey, (started) => { actionStarted = started; }),
         });
         if (this.journal) {
           await this.completeAction(actionKey);
@@ -132,13 +132,9 @@ export class ModerationEnforcer {
       }
       if (alreadyAssigned) return true;
 
-      if (this.journal) {
-        await this.startAction(actionKey);
-        actionStarted = true;
-      }
       await this.moderator.assignRole(moderationCase.userId, this.t2RoleId, {
         signal: this.signal,
-        beforeRequest: () => this.assertMutationAllowed(moderationCase),
+        beforeRequest: () => this.prepareMutation(moderationCase, gate, actionKey, (started) => { actionStarted = started; }),
       });
       if (this.journal) {
         await this.completeAction(actionKey);
@@ -177,6 +173,7 @@ export class ModerationEnforcer {
       signal: this.signal,
       beforeRequest: () => this.assertActive(),
     });
+    const observedAt = this.clock();
     if (!user || typeof user !== "object") throw new Error("Misskey returned invalid user state.");
     const hasProtectedRole = user.roles?.some((role) => role.isModerator || role.isAdministrator);
     if (user.isModerator || user.isAdministrator || hasProtectedRole) {
@@ -191,7 +188,37 @@ export class ModerationEnforcer {
       await this.recordHumanDecisionSkip(moderationCase);
       return { allowed: false, user };
     }
-    return { allowed: true, user };
+    return { allowed: true, user, observedAt };
+  }
+
+  async prepareMutation(moderationCase, gate, actionKey, onStarted) {
+    let started = false;
+    try {
+      await this.assertMutationAllowed(moderationCase);
+      this.assertFreshUser(gate);
+      if (this.journal) {
+        await this.startAction(actionKey);
+        started = true;
+        onStarted(true);
+        await this.assertMutationAllowed(moderationCase);
+        this.assertFreshUser(gate);
+      }
+    } catch (error) {
+      // A rejected preflight has not called fetch. Clear only under a still-live lease.
+      if (started && !isLeaseLost(error)) {
+        await this.resetAction(actionKey);
+        onStarted(false);
+      }
+      throw error;
+    }
+  }
+
+  assertFreshUser(gate) {
+    if (this.clock() - gate.observedAt > this.userStateMaxAgeMs) {
+      throw Object.assign(new Error("Misskey user state expired while waiting; refresh before retrying."), {
+        code: "USER_STATE_STALE", retryable: true,
+      });
+    }
   }
 
   async assertMutationAllowed(moderationCase) {
