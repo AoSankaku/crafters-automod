@@ -1,0 +1,6 @@
+.env
+dist/
+data/*
+!data/human-overrides.json
+coverage/
+*.log

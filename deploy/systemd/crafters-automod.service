@@ -1,0 +1,38 @@
+[Unit]
+Description=Crafters Automod for Misskey
+Documentation=file:///opt/crafters-automod/README.md
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+[Service]
+Type=simple
+User=crafters-automod
+Group=crafters-automod
+WorkingDirectory=/opt/crafters-automod
+EnvironmentFile=/etc/crafters-automod.env
+ExecStartPre=/usr/bin/test -r /opt/crafters-automod/dist/index.js
+ExecStart=/usr/local/bin/bun /opt/crafters-automod/dist/index.js
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+
+StateDirectory=crafters-automod
+StateDirectoryMode=0700
+UMask=0077
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

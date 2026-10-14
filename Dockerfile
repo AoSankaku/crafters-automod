@@ -1,0 +1,26 @@
+FROM oven/bun:1.3.14-alpine AS build
+
+WORKDIR /app
+COPY package.json ./
+COPY src ./src
+COPY test ./test
+COPY rules.md rules.generated.json ./
+RUN bun run build
+
+FROM oven/bun:1.3.14-alpine
+
+WORKDIR /app
+ENV NODE_ENV=production \
+    HEALTH_PORT=8787
+
+COPY --from=build /app/dist ./dist
+COPY package.json ./
+RUN mkdir -p /app/data && chown -R bun:bun /app/data
+
+USER bun
+EXPOSE 8787
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD bun -e "const r=await fetch('http://127.0.0.1:'+process.env.HEALTH_PORT+'/health');if(!r.ok)process.exit(1)"
+
+CMD ["bun", "run", "./dist/index.js"]
