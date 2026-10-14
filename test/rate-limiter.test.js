@@ -45,6 +45,21 @@ describe("DurableApiLimiter", () => {
     expect(store.tryApiSlot).toHaveBeenCalledTimes(1);
   });
 
+  test("does not report a slot when shutdown aborts during the store reservation", async () => {
+    const controller = new AbortController();
+    const store = {
+      tryApiSlot: mock(async () => {
+        controller.abort(new DOMException("Stopped", "AbortError"));
+        return 0;
+      }),
+      blockApi: mock(async () => undefined),
+    };
+    const limiter = new DurableApiLimiter({ store, intervalMs: 100 });
+
+    await expect(limiter.acquire(controller.signal)).rejects.toHaveProperty("name", "AbortError");
+    expect(store.tryApiSlot).toHaveBeenCalledTimes(1);
+  });
+
   test("parses Retry-After and clamps the shared cooldown", async () => {
     const store = {
       tryApiSlot: mock(async () => 0),
@@ -59,9 +74,10 @@ describe("DurableApiLimiter", () => {
     });
 
     await limiter.penalize("120");
-    await limiter.penalize(new Date(now + 500).toUTCString());
+    await limiter.penalize(new Date(now + 1_000).toUTCString());
+    await limiter.penalize("9".repeat(400));
     await limiter.penalize("not-a-date", 750);
 
-    expect(store.blockApi.mock.calls.map(([delay]) => delay)).toEqual([2_000, 500, 750]);
+    expect(store.blockApi.mock.calls.map(([delay]) => delay)).toEqual([2_000, 1_000, 2_000, 750]);
   });
 });

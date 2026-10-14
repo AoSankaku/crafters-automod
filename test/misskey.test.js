@@ -110,14 +110,14 @@ describe("MisskeyApiClient", () => {
       penalize: mock(async () => undefined),
     };
     const fetchImpl = mock(async () =>
-      new Response(JSON.stringify({ error: { code: "RATE_LIMIT", message: "secret-token body" } }), {
+      new Response(JSON.stringify({ error: { code: "SECRETTOKEN", message: "secrettoken body" } }), {
         status: 429,
         headers: { "Retry-After": "3" },
       }),
     );
     const client = new MisskeyApiClient({
       baseUrl: "https://misskey.example",
-      token: "secret-token",
+      token: "secrettoken",
       fetchImpl,
       rateLimiter,
     });
@@ -125,6 +125,10 @@ describe("MisskeyApiClient", () => {
     await expect(client.suspendUser("user-1")).rejects.toMatchObject({
       name: "MisskeyApiError",
       status: 429,
+      code: null,
+      retryAfterMs: 3_000,
+      retryable: true,
+      cooldownPersisted: true,
     });
 
     expect(fetchImpl).toHaveBeenCalledTimes(1);
@@ -147,6 +151,29 @@ describe("MisskeyApiClient", () => {
       fetchImpl: async () => new Response("secret-token malformed remote body", { status: 200 }),
     });
     await expect(jsonClient.getMe()).rejects.toThrow(/^(?!.*secret-token).*$/u);
+  });
+
+  test("aborts an in-flight request and preserves a lease-loss reason for the queue owner", async () => {
+    const controller = new AbortController();
+    const leaseLost = Object.assign(new Error("lease expired"), { code: "LEASE_LOST" });
+    let requestSignal;
+    const fetchImpl = mock((_url, options) => new Promise((_resolve, reject) => {
+      requestSignal = options.signal;
+      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+    }));
+    const client = new MisskeyApiClient({
+      baseUrl: "https://misskey.example",
+      token: "token",
+      fetchImpl,
+    });
+    const pending = client.getMe({ signal: controller.signal });
+    while (!requestSignal) await Promise.resolve();
+
+    controller.abort(leaseLost);
+
+    await expect(pending).rejects.toBe(leaseLost);
+    expect(requestSignal.aborted).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   test("passes the shared rate budget through read and mutation methods", async () => {

@@ -42,7 +42,10 @@ describe("ModerationEnforcer", () => {
 
     expect(await enforcer.enforceT1(moderationCase)).toBe(true);
 
-    expect(moderator.suspendUser).toHaveBeenCalledWith("user-1");
+    expect(moderator.suspendUser.mock.calls[0][0]).toBe("user-1");
+    expect(moderator.suspendUser.mock.calls[0][1]).toEqual(expect.objectContaining({
+      beforeRequest: expect.any(Function),
+    }));
     expect(purgeQueue.enqueue).toHaveBeenCalledWith({ caseId: "case-1", userId: "user-1" });
     expect(events.indexOf("suspend")).toBeLessThan(events.indexOf("t1.suspended"));
     expect(events.indexOf("t1.suspended")).toBeLessThan(events.indexOf("purge-enqueue"));
@@ -71,7 +74,11 @@ describe("ModerationEnforcer", () => {
 
     expect(moderator.suspendUser).toHaveBeenCalledTimes(1);
     expect(purgeQueue.enqueue).not.toHaveBeenCalled();
-    expect(record).toHaveBeenCalledWith("automation.skipped.human", moderationCase, { actor: "human" });
+    expect(record).toHaveBeenCalledWith(
+      "automation.skipped.human",
+      moderationCase,
+      expect.objectContaining({ actor: "human" }),
+    );
     expect(events).not.toContain("purge-enqueue");
   });
 
@@ -90,7 +97,7 @@ describe("ModerationEnforcer", () => {
       expect(harness.record).toHaveBeenCalledWith(
         "automation.skipped.protected",
         harness.moderationCase,
-        { actor: "deterministic" },
+        expect.objectContaining({ actor: "deterministic" }),
       );
     }
 
@@ -114,10 +121,10 @@ describe("ModerationEnforcer", () => {
 
     expect(await enforcer.enforceT1(moderationCase)).toBe(false);
 
-    expect(record).toHaveBeenCalledWith("t1.enforcement.failed", moderationCase, {
+    expect(record).toHaveBeenCalledWith("t1.enforcement.failed", moderationCase, expect.objectContaining({
       actor: "deterministic",
       error: "Misskey unavailable",
-    });
+    }));
     expect(logger.error).toHaveBeenCalledTimes(1);
   });
 });
@@ -138,9 +145,11 @@ describe("ModerationEnforcer mutation safety and restart journal", () => {
     expect(harness.authority.hasHumanDecision).toHaveBeenCalledTimes(2);
     expect(harness.events).not.toContain("suspend");
     expect(harness.purgeQueue.enqueue).not.toHaveBeenCalled();
-    expect(harness.record).toHaveBeenCalledWith("automation.skipped.human", harness.moderationCase, {
-      actor: "human",
-    });
+    expect(harness.record).toHaveBeenCalledWith(
+      "automation.skipped.human",
+      harness.moderationCase,
+      expect.objectContaining({ actor: "human" }),
+    );
   });
 
   test("rethrows a lost lease that occurs after waiting instead of returning retry success", async () => {
@@ -187,7 +196,7 @@ describe("ModerationEnforcer mutation safety and restart journal", () => {
     expect(harness.record).toHaveBeenCalledWith(
       "automation.skipped.uncertain",
       harness.moderationCase,
-      { actor: "deterministic" },
+      expect.objectContaining({ actor: "deterministic", outcome: "human_review_required" }),
     );
   });
 
@@ -202,7 +211,7 @@ describe("ModerationEnforcer mutation safety and restart journal", () => {
     expect(harness.record).toHaveBeenCalledWith(
       "automation.skipped.human-state",
       harness.moderationCase,
-      { actor: "deterministic" },
+      expect.objectContaining({ actor: "deterministic", outcome: "automation_skipped" }),
     );
   });
 
@@ -229,6 +238,31 @@ describe("ModerationEnforcer mutation safety and restart journal", () => {
     expect(harness.journal.complete).not.toHaveBeenCalled();
   });
 
+  test("journals a T2 role assignment and uses the claim signal for reads and mutations", async () => {
+    const signal = new AbortController().signal;
+    const harness = createSafeHarness({ signal });
+    harness.moderator.assignRole.mockImplementation(async (_userId, roleId, options) => {
+      await options.beforeRequest();
+      harness.state.user.roleAssigns.push({ roleId });
+      harness.events.push("assign-role");
+    });
+
+    expect(await harness.enforcer.enforceT2(harness.moderationCase)).toBe(true);
+    expect(await harness.enforcer.enforceT2(harness.moderationCase)).toBe(true);
+
+    expect(harness.moderator.showUser.mock.calls[0][1]).toEqual(expect.objectContaining({
+      signal,
+      beforeRequest: expect.any(Function),
+    }));
+    expect(harness.moderator.assignRole.mock.calls[0][2]).toEqual(expect.objectContaining({
+      signal,
+      beforeRequest: expect.any(Function),
+    }));
+    expect(harness.journal.start).toHaveBeenCalledWith("assign-role:restricted-role");
+    expect(harness.journal.complete).toHaveBeenCalledWith("assign-role:restricted-role");
+    expect(harness.moderator.assignRole).toHaveBeenCalledTimes(1);
+  });
+
   test("requires the completion journal before queuing T1 purge", async () => {
     const harness = createSafeHarness({ user: { isSuspended: true } });
     harness.journal = createJournal({ suspend: { status: "completed" } });
@@ -238,9 +272,11 @@ describe("ModerationEnforcer mutation safety and restart journal", () => {
     expect(await harness.enforcer.enforceT1(harness.moderationCase)).toBe(true);
 
     expect(harness.purgeQueue.enqueue).not.toHaveBeenCalled();
-    expect(harness.record).toHaveBeenCalledWith("automation.skipped.human", harness.moderationCase, {
-      actor: "human",
-    });
+    expect(harness.record).toHaveBeenCalledWith(
+      "automation.skipped.human",
+      harness.moderationCase,
+      expect.objectContaining({ actor: "human" }),
+    );
   });
 });
 
@@ -248,6 +284,7 @@ function createSafeHarness({
   journal = createJournal(),
   assertActive = async () => undefined,
   hasHumanDecision = () => false,
+  signal,
   user = {},
 } = {}) {
   const state = {
@@ -285,6 +322,7 @@ function createSafeHarness({
     t2RoleId: "restricted-role",
     journal,
     assertActive,
+    signal,
   });
   const moderationCase = {
     caseId: "case-1",
