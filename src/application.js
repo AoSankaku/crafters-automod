@@ -1,107 +1,171 @@
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { DurableIntake } from "./durable-intake.js";
+import { DurableWorker } from "./durable-worker.js";
 import { HealthState, startHealthServer } from "./health.js";
-import { FileHumanAuthority } from "./human-authority.js";
+import { validateInboxEnvelope } from "./inbox-envelope.js";
+import { importLegacyJsonl } from "./legacy-import.js";
 import { Logger } from "./logger.js";
 import { MisskeyApiClient } from "./misskey.js";
 import { TieredModerationEngine } from "./moderation.js";
-import { NoteProcessor } from "./note-processor.js";
-import { JsonlAuditLedger, JsonlJobQueue } from "./persistence.js";
+import { DurableApiLimiter } from "./rate-limiter.js";
+import { SharedHumanAuthority } from "./shared-authority.js";
+import { createStore } from "./storage/index.js";
 import { MisskeyStream } from "./stream.js";
 
-/** Compose the service without installing process handlers or reading environment variables. */
+/** Bind all per-case writes to the worker's current lease. */
+export function createCaseHandler({ store, config, rules, sourceSha256, client, authority, logger, selfUserId, createEngine }) {
+  const makeEngine = createEngine ?? ((options) => new TieredModerationEngine(options));
+  return async (payload, context) => {
+    const envelope = validateInboxEnvelope(payload, { rules, sourceSha256, mode: config.mode });
+    if (envelope.userId === selfUserId) {
+      const error = new Error("Inbox case targets the automod account.");
+      error.code = "INVALID_ENVELOPE";
+      error.permanent = true;
+      throw error;
+    }
+    const { claim, assertActive, signal } = context;
+    const guarded = (operation) => async (...args) => {
+      await assertActive();
+      return operation(...args);
+    };
+    const ledger = {
+      hasProcessed: (noteId) => store.hasProcessed(noteId),
+      record: guarded((event) => store.record(event, { lease: claim })),
+    };
+    const queue = (kind) => ({ enqueue: guarded((job) => store.enqueueJob(kind, job, { lease: claim })) });
+    const journal = {
+      get: guarded((key) => store.getAction(envelope.caseId, key)),
+      start: guarded((key) => store.startAction(claim, key)),
+      complete: guarded((key) => store.completeAction(claim, key)),
+      reset: guarded((key) => store.resetAction(claim, key)),
+    };
+    const engine = makeEngine({
+      mode: config.mode, moderator: client, ledger, reviewQueue: queue("review"), purgeQueue: queue("purge"),
+      authority, logger, selfUserId, t2RoleId: config.t2RoleId, reviewDelayMs: config.reviewDelayMs,
+      journal, assertActive, signal,
+      userStateMaxAgeMs: Math.max(5000, config.minimumActionIntervalMs + 2000),
+    });
+    const { caseId, noteId, userId, tier, ruleIds, reasons } = envelope;
+    return engine.processCase({ caseId, noteId, userId, tier, ruleIds, reasons });
+  };
+}
+
 export async function runApplication(
-  { config, rules, sourceSha256, logger = new Logger(), signal },
-  dependencies = {},
+  { config, rules, sourceSha256, logger = new Logger(), signal }, dependencies = {},
 ) {
-  const requiresT2Role = config.mode === "enforce" && rules.some((rule) => rule.enabled && rule.tier === "T2");
-  if (requiresT2Role && !config.t2RoleId) {
+  if (config.mode === "enforce" && !config.t2RoleId && rules.some((rule) => rule.enabled && rule.tier === "T2")) {
     throw new Error("T2_ROLE_ID is required when an enabled T2 rule runs in enforce mode.");
   }
-  logger.info("Static automod rules loaded", {
-    count: rules.length,
-    enabled: rules.filter((rule) => rule.enabled).length,
-    sourceSha256,
-  });
-
-  const client = dependencies.client ?? new MisskeyApiClient({ baseUrl: config.baseUrl, token: config.token });
-  const me = await client.getMe();
-  if (!me?.id) throw new Error("The Misskey token did not return an authenticated user.");
-  if (me.host != null) throw new Error("The automod token must belong to a local Misskey account.");
-
-  const ledger = dependencies.ledger ?? new JsonlAuditLedger(join(config.dataDirectory, "audit.jsonl"));
-  const reviewQueue = dependencies.reviewQueue ?? new JsonlJobQueue(
-    join(config.dataDirectory, "llm-review-queue.jsonl"), { maxJobs: config.maxQueuedJobs },
-  );
-  const purgeQueue = dependencies.purgeQueue ?? new JsonlJobQueue(
-    join(config.dataDirectory, "t1-purge-queue.jsonl"), { maxJobs: config.maxQueuedJobs },
-  );
-  await Promise.all([ledger.initialize(), reviewQueue.initialize(), purgeQueue.initialize()]);
-  const authority = dependencies.authority ?? new FileHumanAuthority(
-    join(config.dataDirectory, "human-overrides.json"), logger,
-  );
-  const createEngine = dependencies.createEngine ?? ((options) => new TieredModerationEngine(options));
-  const engine = createEngine({
-    mode: config.mode,
-    moderator: client,
-    ledger,
-    reviewQueue,
-    purgeQueue,
-    authority,
-    logger,
-    selfUserId: me.id,
-    t2RoleId: config.t2RoleId,
-    reviewDelayMs: config.reviewDelayMs,
-  });
-  const health = new HealthState(config.mode);
-  health.rulesLoaded = rules.length;
-  const processor = new NoteProcessor({
-    processNote: (note) => engine.process(note, rules),
-    maxPendingNotes: config.maxPendingNotes,
-    logger,
-    onStateChange: (snapshot) => {
-      health.noteProcessing = snapshot;
-    },
-  });
-  health.noteProcessing = processor.snapshot();
-  const startHealth = dependencies.startHealth ?? startHealthServer;
-  const healthServer = await startHealth({
-    host: config.healthHost, port: config.healthPort, state: health, logger,
-  });
-  let stream;
-
+  const controller = new AbortController();
+  const shutdown = () => controller.abort();
+  if (signal?.aborted) shutdown();
+  else signal?.addEventListener("abort", shutdown, { once: true });
+  let store, healthServer, stream, intake, poll;
+  let pollPending = Promise.resolve();
+  let fatal;
+  const tasks = [];
+  const fail = (error) => {
+    fatal ??= error;
+    controller.abort();
+  };
   try {
-    const createStream = dependencies.createStream ?? ((options) => new MisskeyStream(options));
-    stream = createStream({
-      baseUrl: config.baseUrl,
-      token: config.token,
-      logger,
-      onConnectionChange: (connected) => {
-        health.streamConnected = connected;
-      },
-      onNote: (note) => {
-        health.lastNoteAt = new Date().toISOString();
-        processor.submit(note);
-      },
+    if (controller.signal.aborted) return;
+    if (config.storageBackend === "sqlite") await mkdir(config.dataDirectory, { recursive: true });
+    store = dependencies.store ?? await createStore({
+      backend: config.storageBackend, sqlitePath: config.sqlitePath, databaseUrl: config.databaseUrl,
+      namespace: config.namespace, maxInboxJobs: config.maxInboxJobs, maxQueuedJobs: config.maxQueuedJobs,
+      maxAttempts: config.maxWorkAttempts,
     });
-    logger.info("Automod started", { mode: config.mode, misskeyUrl: config.baseUrl, accountId: me.id });
-    if (config.mode === "dry-run") {
-      logger.warn("Dry-run mode is active; no notes or accounts will be modified");
+    const limiter = dependencies.rateLimiter ?? new DurableApiLimiter({ store, intervalMs: config.minimumActionIntervalMs });
+    const client = dependencies.client ?? new MisskeyApiClient({ baseUrl: config.baseUrl, token: config.token, rateLimiter: limiter });
+    const me = await client.getMe({ signal: controller.signal });
+    if (!me?.id) throw new Error("The Misskey token did not return an authenticated user.");
+    if (me.host != null) throw new Error("The automod token must belong to a local Misskey account.");
+    if (config.storageBackend === "sqlite") await (dependencies.importLegacy ?? importLegacyJsonl)(store, config.dataDirectory);
+    const authority = dependencies.authority ?? new SharedHumanAuthority({
+      store, logger, localPath: config.storageBackend === "sqlite" ? join(config.dataDirectory, "human-overrides.json") : null,
+    });
+    const health = new HealthState(config.mode, config.role);
+    health.rulesLoaded = rules.length;
+    const refresh = async () => {
+      try {
+        health.queue = await store.stats();
+        health.api = limiter.snapshot();
+        health.storageConnected = true;
+      } catch (error) {
+        health.storageConnected = false;
+        fail(error);
+      }
+    };
+    await refresh();
+    if (fatal) throw fatal;
+    healthServer = await (dependencies.startHealth ?? startHealthServer)({
+      host: config.healthHost, port: config.healthPort, state: health, logger,
+    });
+    // One database health request in flight at a time, including during shutdown.
+    let polling = false;
+    poll = setInterval(() => {
+      if (polling) return;
+      polling = true;
+      pollPending = refresh().finally(() => { polling = false; });
+    }, 1000);
+    if (config.role !== "worker") {
+      intake = new DurableIntake({
+        store, rules, sourceSha256, mode: config.mode, selfUserId: me.id,
+        maxPendingNotes: config.maxPendingNotes, logger,
+        onStateChange: (snapshot) => { health.noteProcessing = snapshot; },
+      });
+      health.noteProcessing = intake.snapshot();
+      stream = (dependencies.createStream ?? ((options) => new MisskeyStream(options)))({
+        baseUrl: config.baseUrl, token: config.token, logger,
+        onConnectionChange: (connected) => { health.streamConnected = connected; },
+        onNote: (note) => {
+          health.lastNoteAt = new Date().toISOString();
+          try {
+            intake.submit(note).catch(() => fail(new Error("Durable intake failed; ingestion stopped.")));
+          } catch {
+            fail(new Error("Durable intake failed; ingestion stopped."));
+          }
+        },
+      });
     }
+    if (config.role !== "ingest") {
+      const worker = (dependencies.createWorker ?? ((options) => new DurableWorker(options)))({
+        store, concurrency: config.workerConcurrency, leaseMs: config.workLeaseMs, pollMs: config.workerPollMs,
+        retryBaseMs: config.retryBaseMs, retryMaxMs: config.retryMaxMs, logger,
+        handle: createCaseHandler({ store, config, rules, sourceSha256, client, authority, logger,
+          selfUserId: me.id, createEngine: dependencies.createEngine }),
+        onStateChange: (snapshot) => { health.worker = snapshot; },
+      });
+      health.workerRunning = true;
+      tasks.push(Promise.resolve().then(() => worker.run(controller.signal)).finally(() => { health.workerRunning = false; }));
+    }
+    if (stream) tasks.push(Promise.resolve().then(() => stream.run(controller.signal)));
+    logger.info("Automod started", { mode: config.mode, role: config.role, backend: config.storageBackend,
+      namespace: config.namespace, misskeyUrl: config.baseUrl, accountId: me.id, sourceSha256 });
+    if (config.mode === "dry-run") logger.warn("Dry-run mode is active; no notes or accounts will be modified");
     if (rules.some((rule) => rule.enabled && rule.tier === "T1")) {
-      logger.warn("T1 purge jobs are persisted but require a Misskey server-side deletion worker");
+      logger.warn("T1 purge jobs require a verified Misskey server-side deletion worker");
     }
-    await stream.run(signal);
+    await Promise.race(tasks);
+    if (fatal) throw fatal;
   } finally {
-    const drained = processor.close();
+    clearInterval(poll);
+    signal?.removeEventListener("abort", shutdown);
+    controller.abort();
+    const drained = intake?.close();
     try {
       stream?.close();
     } finally {
+      await Promise.allSettled([...tasks, drained, pollPending]);
       try {
-        await drained;
+        if (healthServer) await new Promise((resolve) => healthServer.close(resolve));
       } finally {
-        await new Promise((resolve) => healthServer.close(resolve));
-        logger.info("Automod stopped");
+        await store?.close();
       }
     }
+    logger.info("Automod stopped");
   }
+  if (fatal) throw fatal;
 }

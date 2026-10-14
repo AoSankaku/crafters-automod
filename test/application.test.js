@@ -21,6 +21,7 @@ function harness({ user = { id: "automod", host: null }, role = "all", runStream
   });
   const order = [];
   const store = {
+    tryApiSlot: mock(async () => 0), blockApi: mock(async () => {}),
     enqueue: mock(async () => ({ inserted: true })),
     stats: mock(async () => ({ pending: 0, running: 0, dead: 0, completed: 0, reviewJobs: 0, purgeJobs: 0, apiRequests: 0, apiBlockedUntil: 0 })),
     close: mock(async () => { order.push("store.closed"); }),

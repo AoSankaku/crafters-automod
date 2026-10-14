@@ -1,9 +1,14 @@
 import { createServer } from "node:http";
 
 export class HealthState {
-  constructor(mode) {
+  constructor(mode, role = "all") {
     this.startedAt = new Date().toISOString();
     this.mode = mode;
+    this.role = role;
+    this.storageConnected = true;
+    this.workerRunning = false;
+    this.queue = null;
+    this.api = null;
     this.streamConnected = false;
     this.rulesLoaded = 0;
     this.lastNoteAt = null;
@@ -12,8 +17,15 @@ export class HealthState {
 
   snapshot() {
     return {
-      status: this.streamConnected ? "ok" : "degraded",
+      status: this.storageConnected && (this.role === "worker" || this.streamConnected) &&
+        (this.role === "ingest" || this.workerRunning) ? "ok" : "degraded",
       mode: this.mode,
+      role: this.role,
+      storageConnected: this.storageConnected,
+      workerRunning: this.workerRunning,
+      worker: this.worker ? { ...this.worker } : null,
+      queue: this.queue ? { ...this.queue } : null,
+      api: this.api ? { ...this.api } : null,
       streamConnected: this.streamConnected,
       rulesLoaded: this.rulesLoaded,
       startedAt: this.startedAt,

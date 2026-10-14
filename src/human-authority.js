@@ -18,7 +18,7 @@ export class FileHumanAuthority {
       );
     } catch (error) {
       if (error?.code === "ENOENT") return false;
-      this.logger.error("Human override file is invalid; failing closed", error);
+      this.logger.error("Human override file is invalid; failing closed", new Error("Human override state is unavailable or invalid."));
       return true;
     }
   }

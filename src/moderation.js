@@ -15,6 +15,10 @@ export class TieredModerationEngine {
     selfUserId,
     t2RoleId,
     reviewDelayMs,
+    journal,
+    assertActive,
+    signal,
+    userStateMaxAgeMs,
   }) {
     this.mode = mode;
     this.moderator = moderator;
@@ -34,35 +38,41 @@ export class TieredModerationEngine {
       authority,
       logger,
       t2RoleId,
+      journal,
+      assertActive,
+      signal,
+      userStateMaxAgeMs,
     });
   }
 
   async process(note, rules) {
-    if (this.processedNoteIds.has(note?.id) || this.ledger.hasProcessed?.(note?.id)) return;
     const classification = classifyNote(note, rules, this.selfUserId);
-    if (!classification) return;
-
-    this.remember(note.id);
-    try {
-      const moderationCase = {
+    if (!classification) return true;
+    return this.processCase({
         caseId: note.id,
         noteId: note.id,
         userId: note.userId ?? note.user?.id,
-        username: note.user?.username,
         tier: classification.tier,
         ruleIds: classification.ruleIds,
         reasons: classification.reasons,
-      };
+      });
+  }
+
+  async processCase(moderationCase) {
+    const { noteId, tier } = moderationCase;
+    if (this.processedNoteIds.has(noteId) || await this.ledger.hasProcessed?.(noteId)) return true;
+    this.remember(noteId);
+    try {
       await this.record("case.classified", moderationCase, { actor: "deterministic", mode: this.mode });
       this.logger.warn("Note classified by automod", { ...moderationCase, mode: this.mode });
 
       if (await this.authority.hasHumanDecision(moderationCase)) {
         await this.record("automation.skipped.human", moderationCase, { actor: "human" });
         await this.record("case.completed", moderationCase, { actor: "human" });
-        return;
+        return true;
       }
 
-      if (classification.tier === "T2" || classification.tier === "T3") {
+      if (tier === "T2" || tier === "T3") {
         await this.reviewQueue.enqueue({
           caseId: moderationCase.caseId,
           noteId: moderationCase.noteId,
@@ -74,21 +84,22 @@ export class TieredModerationEngine {
         await this.record("llm-review.queued", moderationCase, { actor: "deterministic" });
       }
 
-      if (this.mode === "dry-run" || classification.tier === "T3") {
+      if (this.mode === "dry-run" || tier === "T3") {
         await this.record("case.completed", moderationCase, { actor: "deterministic" });
-        return;
+        return true;
       }
       const succeeded =
-        classification.tier === "T1"
+        tier === "T1"
           ? await this.enforceT1(moderationCase)
           : await this.enforceT2(moderationCase);
       if (succeeded) {
         await this.record("case.completed", moderationCase, { actor: "deterministic" });
       } else {
-        this.forget(note.id);
+        this.forget(noteId);
       }
+      return succeeded;
     } catch (error) {
-      this.forget(note.id);
+      this.forget(noteId);
       throw error;
     }
   }

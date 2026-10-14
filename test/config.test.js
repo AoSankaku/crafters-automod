@@ -3,6 +3,9 @@ import { describe, expect, test } from "bun:test";
 import { loadConfig } from "../src/config.js";
 
 describe("loadConfig", () => {
+  test("invalid URLs never echo credentials in errors", () => {
+    expect(() => loadConfig({ MISSKEY_URL: "invalid-private-url", MISSKEY_TOKEN: "private-token" })).toThrow(/MISSKEY_URL must/);
+  });
   test("defaults to dry-run", () => {
     const config = loadConfig(
       { MISSKEY_URL: "https://misskey.example/", MISSKEY_TOKEN: "token" },

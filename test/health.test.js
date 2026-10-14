@@ -27,6 +27,7 @@ describe("health lifecycle", () => {
       expect(disconnected.status).toBe(503);
       expect(await disconnected.json()).toEqual(expect.objectContaining({ noteProcessing: state.noteProcessing }));
       state.streamConnected = true;
+      state.workerRunning = true;
       const connected = await fetch(`${url}/health`);
       expect(connected.status).toBe(200);
       expect(connected.headers.get("cache-control")).toBe("no-store");
@@ -34,5 +35,16 @@ describe("health lifecycle", () => {
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
+  });
+
+  test("worker health uses storage and worker state without requiring a streaming socket", () => {
+    const state = new HealthState("dry-run", "worker");
+    state.workerRunning = true;
+    expect(state.snapshot().status).toBe("ok");
+    state.storageConnected = false;
+    expect(state.snapshot().status).toBe("degraded");
+    const ingest = new HealthState("dry-run", "ingest");
+    ingest.streamConnected = true;
+    expect(ingest.snapshot().status).toBe("ok");
   });
 });

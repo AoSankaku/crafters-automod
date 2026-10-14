@@ -6,10 +6,13 @@
   "packageManager": "bun@1.3.14",
   "scripts": {
     "rules:check": "bun test ./test/generated-rules.test.js",
-    "build": "bun run rules:check && bun build ./src/index.js --outdir ./dist --target bun",
+    "build": "bun run rules:check && bun build ./src/index.js ./src/cli.js --outdir ./dist --target bun",
     "start": "bun run ./dist/index.js",
     "dev": "bun run ./src/index.js",
     "test": "bun test",
-    "test:coverage": "bun test --coverage"
+    "test:coverage": "bun test --coverage",
+    "override": "bun run ./dist/cli.js override",
+    "migrate": "bun run ./dist/cli.js migrate",
+    "status": "bun run ./dist/cli.js status"
   }
 }

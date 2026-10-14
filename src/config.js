@@ -4,7 +4,8 @@ import { createHash } from "node:crypto";
 export function loadConfig(env = process.env, workingDirectory = process.cwd()) {
   const baseUrl = required(env.MISSKEY_URL, "MISSKEY_URL");
   const token = required(env.MISSKEY_TOKEN, "MISSKEY_TOKEN");
-  const parsedUrl = new URL(baseUrl);
+  let parsedUrl;
+  try { parsedUrl = new URL(baseUrl); } catch { throw new Error("MISSKEY_URL must be a valid HTTP or HTTPS URL."); }
   if (!["http:", "https:"].includes(parsedUrl.protocol)) {
     throw new Error("MISSKEY_URL must use http or https.");
   }
