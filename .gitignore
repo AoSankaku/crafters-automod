@@ -4,3 +4,4 @@ data/*
 !data/human-overrides.json
 coverage/
 *.log
+.test-tools/
