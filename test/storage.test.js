@@ -63,6 +63,60 @@ function caseJob(caseId, userId = `user-${caseId}`) {
 }
 
 describe("durable moderation store (SQLite)", () => {
+  test("shares a bounded daily reputation API budget and persists its cooldown separately", async () => {
+    const f = await fixture();
+    const store = await f.open();
+    expect(await store.tryReputationSlot(100, 2)).toBe(0);
+    expect(await store.tryReputationSlot(100, 2)).toBe(100);
+    f.setNow(1_100);
+    expect(await store.tryReputationSlot(100, 2)).toBe(0);
+    expect(await store.tryReputationSlot(100, 2)).toBeGreaterThan(0);
+    await store.blockReputationApi(300);
+    expect(await store.tryReputationSlot(100, 2)).toBeGreaterThanOrEqual(300);
+    expect(await store.tryApiSlot(100)).toBe(0);
+    expect(await store.reputationStats()).toEqual(expect.objectContaining({
+      apiRequests: 2, requestsToday: 2, blockedUntil: 1_400,
+    }));
+  });
+
+  test("caches only sanitized reputation results by policy and user, with bounded eviction", async () => {
+    const f = await fixture({ maxInboxJobs: 10 });
+    const store = await f.open();
+    const envelope = (id) => ({ version: 1, noteId: id, userId: `user-${id}`, receivedAt: 1_000 });
+    const first = await store.enqueue(envelope("one"));
+    const second = await store.enqueue(envelope("two"));
+    const claimOne = await store.claim({ workerId: "worker", leaseMs: 500 });
+    const claimTwo = await store.claim({ workerId: "worker", leaseMs: 500 });
+    const policyKey = "a".repeat(64);
+    const listed = { status: "listed", score: 90, signals: [{ kind: "email", frequency: 10, confidence: 80, lastSeen: 999 }] };
+    expect(await store.getReputation("user-one", policyKey)).toBeNull();
+    const saved = await store.saveReputation(claimOne, policyKey, listed, 100, { maxEntries: 1 });
+    expect(saved).toEqual({ caseId: "one", result: listed, checkedAt: 1_000, expiresAt: 1_100 });
+    expect(await store.getReputation("user-one", policyKey)).toEqual(saved);
+    await store.saveReputation(claimTwo, policyKey, { status: "clear", score: 0, signals: [] }, 200, { maxEntries: 1 });
+    expect(await store.getReputation("user-one", policyKey)).toBeNull();
+    expect(await store.getReputation("user-two", policyKey)).toEqual(expect.objectContaining({ caseId: "two" }));
+    expect(await store.reputationStats()).toEqual(expect.objectContaining({ cacheEntries: 1 }));
+  });
+
+  test("rejects raw identifiers and stale lease writes in reputation storage", async () => {
+    const f = await fixture();
+    const store = await f.open();
+    await store.enqueue(envelope("one", "user-one"));
+    const claim = await store.claim({ workerId: "worker", leaseMs: 500 });
+    const key = "b".repeat(64);
+    await expect(store.saveReputation(claim, key, {
+      status: "listed", score: 1, email: "private@example.invalid", signals: [],
+    }, 100)).rejects.toBeInstanceOf(StorageError);
+    expect(await store.saveReputation(claim, key, {
+      status: "listed", score: 1, signals: [{ kind: "email", frequency: 1, confidence: 50, lastSeen: 999 }],
+    }, 100)).toBeTruthy();
+    await store.fail(claim, { code: "retry", delayMs: 0 });
+    await expect(store.saveReputation(claim, key, { status: "clear", score: 0, signals: [] }, 100))
+      .rejects.toBeInstanceOf(LeaseLostError);
+    await expect(store.getReputation("user-one", "not-a-hash")).rejects.toBeInstanceOf(StorageError);
+  });
+
   test("restores inbox deduplication, completed cases, audit state, and jobs after restart", async () => {
     const { open } = await fixture();
     let store = await open();

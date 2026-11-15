@@ -3,6 +3,14 @@ import { describe, expect, test } from "bun:test";
 import { loadConfig } from "../src/config.js";
 
 describe("loadConfig", () => {
+  test("requires explicit opt-in for external reputation and extra IP disclosure", () => {
+    const env = { MISSKEY_URL: "https://misskey.example", MISSKEY_TOKEN: "token" };
+    expect(loadConfig(env).stopForumSpam).toEqual({ enabled: false, checkIp: false, intervalMs: 1100, maxDailyRequests: 5000, cacheTtlMs: 21600000, failureTtlMs: 300000 });
+    expect(loadConfig({ ...env, SFS_ENABLED: "true", SFS_CHECK_IP: "true" }).stopForumSpam.checkIp).toBe(true);
+    for (const change of [{ SFS_ENABLED: "yes" }, { SFS_CHECK_IP: "true" }, { SFS_MIN_INTERVAL_MS: "0" }, { SFS_MAX_DAILY_REQUESTS: "0" }]) {
+      expect(() => loadConfig({ ...env, ...change })).toThrow();
+    }
+  });
   test("invalid URLs never echo credentials in errors", () => {
     expect(() => loadConfig({ MISSKEY_URL: "invalid-private-url", MISSKEY_TOKEN: "private-token" })).toThrow(/MISSKEY_URL must/);
   });
