@@ -55,7 +55,7 @@ PowerShellではコピーを次のように実行できます。
 Copy-Item -LiteralPath .env.example -Destination .env
 ```
 
-プライベートリポジトリの取得にはGitHubの認証が必要です。`.env`を編集し、まず次の設定を確認してください。
+公開リポジトリの取得にはGitHubの認証は不要です。変更をpushする際は権限を持つアカウントで認証してください。`.env`を編集し、まず次の設定を確認します。
 
 ```ini
 MISSKEY_URL=http://127.0.0.1:3000
@@ -267,3 +267,5 @@ bun run build
 実SQLite・PostgreSQLでの重複防止、共有予算、人間優先、障害復旧、移行はテスト済みです。実SFSには架空メールのハッシュで疎通を確認しています。**実Misskeyでの稼働・権限・負荷検証、Docker / systemdでの実配置は未検証です。**
 
 設計は[architecture](docs/architecture.md)、検証記録は[初期実装](docs/testing/misskey-automod.tdd.md)、[永続化](docs/testing/durable-processing.tdd.md)、[SFS](docs/testing/stop-forum-spam.tdd.md)を参照してください。
+
+リポジトリの公開前に行った機密情報確認は[公開前レビュー](docs/security/publication-review.md)に記録しています。

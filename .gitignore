@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 dist/
 data/*
 !data/human-overrides.json

@@ -1,4 +1,7 @@
 .env
+.env.*
+!.env.example
+.test-tools/
 .git
 data
 dist
