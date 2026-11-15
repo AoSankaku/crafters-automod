@@ -10,6 +10,8 @@ Automod は Docker に依存していないため、Misskey と同じ Linux ホ�
 
 Node.js・pnpmとBun 1.3.14以上を用意し、運用ホストまたは同等のビルド環境のソースディレクトリで、インストール・テスト・ビルドを実行します。pnpmの版はこのリポジトリの`packageManager`に従ってください。
 
+`pnpm install`はBun本体を導入しません。ビルドするユーザーで`bun --version`を実行できることを先に確認してください。`bun: not found`の場合は[READMEの導入手順](../README.md#0-実行環境の確認とbunの導入)を使います。
+
 ```sh
 pnpm install --frozen-lockfile
 pnpm test
@@ -77,7 +79,15 @@ sudo chmod 0600 /etc/crafters-automod.env
 command -v bun
 ```
 
-同梱unitは `/usr/local/bin/bun` を想定しています。結果が異なる場合は、[deploy/systemd/crafters-automod.service](../deploy/systemd/crafters-automod.service) の `ExecStart` を実際の絶対パスに変更します。
+同梱unitは `/usr/local/bin/bun` を想定しています。公式インストーラーでログインユーザーの`$HOME/.bun/bin/bun`へ導入した場合、unitの`ProtectHome=true`によりその場所をサービスから参照できません。インストール済みのBunが正常に動くことを確認してから、サービス用の場所へ配置します。
+
+```sh
+"$HOME/.bun/bin/bun" --version
+sudo install -o root -g root -m 0755 "$HOME/.bun/bin/bun" /usr/local/bin/bun
+/usr/local/bin/bun --version
+```
+
+既にサービスから参照できる別の場所へBunを導入している場合は、[deploy/systemd/crafters-automod.service](../deploy/systemd/crafters-automod.service)の`ExecStart`をその絶対パスに変更します。Bun更新後はサービス用のコピーも更新し、版を確認してから再起動してください。
 
 ソースディレクトリでの手動操作はpnpmを使います。常駐サービスの配置先にはビルド済みファイルを置き、unitはBunを直接起動します。サービス用ユーザーのPATHへpnpmやNode.jsを追加する必要はありません。Dockerイメージもビルド済みファイルをBunで直接起動します。
 

@@ -44,6 +44,30 @@ Misskeyのローカルタイムラインを監視する、サーバー運営者�
 
 Automodの実行には`bun:sqlite`・`Bun.SQL`・Bunのビルド機能を使うため、**Bun 1.3.14以上も必要**です。pnpmの各スクリプトがBunを呼び出し、Bunが`.env`を読み込みます。外部npm依存はありません。DockerfileはBun 1.3.14を指定し、直近の開発検証はBun 1.4.4で行っています。pnpm未導入の場合は[公式の導入手順](https://pnpm.io/installation)を参照してください。
 
+### 0. 実行環境の確認とBunの導入
+
+Automodをビルドするユーザーで、次の3つが実行できることを確認します。
+
+```sh
+node --version
+pnpm --version
+bun --version
+```
+
+**`pnpm install`はBun本体をインストールしません。** `sh: 1: bun: not found`は、Bunが未導入、またはそのシェルのPATHにない状態です。pnpmの更新通知とは関係ありません。
+
+Linuxでは[Bun公式のインストーラー](https://bun.com/docs/installation)を使えます。`curl`と`unzip`が必要です。Ubuntu/Debianで不足している場合は、先に`sudo apt update`と`sudo apt install -y curl unzip`を実行してください。
+
+```sh
+curl -fsSL https://bun.com/install | bash
+export PATH="$HOME/.bun/bin:$PATH"
+bun --version
+```
+
+表示された版が1.3.14以上であることを確認してから、以下の手順へ進みます。既に`$HOME/.bun/bin/bun`がある場合は、インストーラーを再実行せずPATHの設定だけで解消できます。次回ログイン時にも使えるよう、Bashなら`~/.bashrc`、Zshなら`~/.zshrc`にも同じPATH設定があることを確認してください。Windows・macOSの導入方法は公式ページを参照してください。
+
+途中のビルドでこのエラーになった場合は、Bunを導入して同じプロジェクトディレクトリで`pnpm run build`を再実行します。ビルド成功後に`pnpm start`を実行してください。systemdの専用ユーザーから使うBunの配置は[常駐手順](docs/systemd.md#4-unit-のインストール)を参照してください。
+
 ### 1. 取得と環境設定
 
 ```sh

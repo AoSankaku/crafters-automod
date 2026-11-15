@@ -12,7 +12,7 @@
 
 ## 小規模: Misskeyとの同居
 
-Node.js・pnpmとBun 1.3.14以上を用意します。手動操作はpnpmで実行し、各スクリプトがBunのビルド・SQLite・SQL機能を利用します。pnpmの版はこのリポジトリの`packageManager`に従ってください。
+Node.js・pnpmとBun 1.3.14以上を用意します。手動操作はpnpmで実行し、各スクリプトがBunのビルド・SQLite・SQL機能を利用します。pnpmの版はこのリポジトリの`packageManager`に従ってください。**pnpmでのインストールはBun本体を導入しません。** ビルドするユーザーで`bun --version`が実行できない場合は、先に[実行環境の導入手順](../README.md#0-実行環境の確認とbunの導入)に従ってBunとPATHを設定してください。
 
 `.env.example`を`.env`へコピーし、URLとトークンを設定します。
 
