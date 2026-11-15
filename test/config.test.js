@@ -3,6 +3,15 @@ import { describe, expect, test } from "bun:test";
 import { loadConfig } from "../src/config.js";
 
 describe("loadConfig", () => {
+  test("enables moderation-note logging by default with validated language and opt-out", () => {
+    const env = { MISSKEY_URL: "https://misskey.example", MISSKEY_TOKEN: "token" };
+    expect(loadConfig(env).moderationNoteEnabled).toBe(true);
+    expect(loadConfig(env).moderationNoteLanguage).toBe("ja");
+    expect(loadConfig({ ...env, MODERATION_NOTE_ENABLED: "false", MODERATION_NOTE_LANGUAGE: "en" }))
+      .toEqual(expect.objectContaining({ moderationNoteEnabled: false, moderationNoteLanguage: "en" }));
+    expect(() => loadConfig({ ...env, MODERATION_NOTE_ENABLED: "yes" })).toThrow(/MODERATION_NOTE_ENABLED/);
+    expect(() => loadConfig({ ...env, MODERATION_NOTE_LANGUAGE: "invalid" })).toThrow(/MODERATION_NOTE_LANGUAGE/);
+  });
   test("requires explicit opt-in for external reputation and extra IP disclosure", () => {
     const env = { MISSKEY_URL: "https://misskey.example", MISSKEY_TOKEN: "token" };
     expect(loadConfig(env).stopForumSpam).toEqual({ enabled: false, checkIp: false, intervalMs: 1100, maxDailyRequests: 5000, cacheTtlMs: 21600000, failureTtlMs: 300000 });

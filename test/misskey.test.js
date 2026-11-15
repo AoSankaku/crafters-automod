@@ -4,6 +4,19 @@ import { MisskeyApiClient, MisskeyApiError } from "../src/misskey.js";
 import { buildStreamingUrl, MisskeyStream, parseStreamNote } from "../src/stream.js";
 
 describe("MisskeyApiClient", () => {
+  test("updates moderation notes through the shared budget and guarded admin endpoint", async () => {
+    const order = [];
+    const fetchImpl = mock(async () => { order.push("fetch"); return new Response(null, { status: 204 }); });
+    const client = new MisskeyApiClient({ baseUrl: "https://misskey.example", token: "token", fetchImpl,
+      rateLimiter: { acquire: async () => { order.push("budget"); } } });
+    await client.updateUserNote("user-1", "Existing human note\nAutomod log", {
+      beforeRequest: async () => { order.push("guard"); },
+    });
+    expect(order).toEqual(["budget", "guard", "fetch"]);
+    const [url, request] = fetchImpl.mock.calls[0];
+    expect(url).toBe("https://misskey.example/api/admin/update-user-note");
+    expect(JSON.parse(request.body)).toEqual({ userId: "user-1", text: "Existing human note\nAutomod log" });
+  });
   test("uses bearer authentication and the moderator delete endpoint", async () => {
     const fetchImpl = mock(async () => new Response("{}", { status: 204 }));
     const client = new MisskeyApiClient({
