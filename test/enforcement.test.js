@@ -183,6 +183,7 @@ describe("ModerationEnforcer mutation safety and restart journal", () => {
     expect(harness.moderator.suspendUser).toHaveBeenCalledTimes(1);
     expect(harness.purgeQueue.enqueue).toHaveBeenCalledTimes(2);
     expect(harness.journal.get).toHaveBeenCalledWith("suspend");
+    expect(harness.record.mock.calls.filter(([type]) => type === "t1.suspended")).toHaveLength(2);
   });
 
   test("holds an ambiguous started mutation for human review after restart", async () => {

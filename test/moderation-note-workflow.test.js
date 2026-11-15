@@ -79,17 +79,18 @@ describe("default Misskey moderation-note workflow", () => {
     });
   }
 
-  test("retries a definitely rejected log without repeating the successful role assignment", async () => {
-    const h = await fixture("T2", { MODERATION_NOTE_LANGUAGE: "en" });
+  for (const tier of ["T1", "T2"]) test(`retries a rejected ${tier} log without repeating the successful restriction`, async () => {
+    const h = await fixture(tier, { MODERATION_NOTE_LANGUAGE: "en" });
     try {
       h.rejectNextLog();
       await h.worker().processOne();
       expect(await h.store.hasProcessed("note")).toBe(false);
       await Bun.sleep(10);
       await h.worker().processOne();
-      expect(h.calls.filter((call) => call === "admin/roles/assign")).toHaveLength(1);
+      const endpoint = tier === "T1" ? "admin/suspend-user" : "admin/roles/assign";
+      expect(h.calls.filter((call) => call === endpoint)).toHaveLength(1);
       expect(h.calls.filter((call) => call === "admin/update-user-note")).toHaveLength(2);
-      expect(h.user.moderationNote).toContain("Restrictive role");
+      expect(h.user.moderationNote).toContain(tier === "T1" ? "Account suspended" : "Restrictive role");
       expect(await h.store.stats()).toEqual(expect.objectContaining({ completed: 1, pending: 0 }));
     } finally { await h.store.close(); }
   });
