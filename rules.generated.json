@@ -1,5 +1,18 @@
 {
   "schemaVersion": 2,
-  "sourceSha256": "306b9bcac11dd34d39e0a74078eee75118e67ad156f3484e5177e85d0aee858f",
-  "rules": []
+  "sourceSha256": "566aee0cdb09656a17667273cf7c97161d64d60a83baa04866c2b66d624c44aa",
+  "rules": [],
+  "accountReputation": {
+    "schemaVersion": 1,
+    "id": "stopforumspam-account",
+    "enabled": true,
+    "tier": "T3",
+    "reason": "Stop Forum Spamの最近の一致情報に基づく追加観察（自動制限なし）",
+    "minFrequency": 3,
+    "minConfidence": 75,
+    "maxAgeDays": 90,
+    "emailScore": 40,
+    "ipScore": 20,
+    "excludedUserIds": []
+  }
 }

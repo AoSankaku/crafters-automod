@@ -43,6 +43,10 @@ export class MisskeyApiClient {
     return this.request("admin/show-user", { userId }, options);
   }
 
+  getUserIps(userId, options) {
+    return this.request("admin/get-user-ips", { userId }, options);
+  }
+
   assignRole(userId, roleId, options) {
     return this.request("admin/roles/assign", { userId, roleId }, options);
   }

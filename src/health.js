@@ -26,6 +26,7 @@ export class HealthState {
       worker: this.worker ? { ...this.worker } : null,
       queue: this.queue ? { ...this.queue } : null,
       api: this.api ? { ...this.api } : null,
+      reputation: this.reputation ? { ...this.reputation } : { enabled: false },
       streamConnected: this.streamConnected,
       rulesLoaded: this.rulesLoaded,
       startedAt: this.startedAt,

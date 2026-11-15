@@ -1,10 +1,13 @@
 import { createInboxEnvelope } from "./inbox-envelope.js";
 
 export class DurableIntake {
-  constructor({ store, rules, sourceSha256, mode, selfUserId, maxPendingNotes, logger, onStateChange = () => {} }) {
+  constructor({ store, rules, sourceSha256, mode, selfUserId, reputationPolicy = null, reputationPolicyKey = null,
+    maxPendingNotes, logger, onStateChange = () => {} }) {
     this.store = store;
     this.rules = rules;
-    this.options = { sourceSha256, mode, selfUserId };
+    this.options = { sourceSha256, mode, selfUserId, reputationPolicy };
+    this.reputationPolicyKey = reputationPolicyKey;
+    this.cached = 0;
     this.capacity = maxPendingNotes;
     this.logger = logger;
     this.onStateChange = onStateChange;
@@ -25,9 +28,9 @@ export class DurableIntake {
     }
     // Only the body-free classification is captured by the persistence promise.
     let operation;
-    operation = Promise.resolve(this.store.enqueue(envelope))
-      .then(({ inserted }) => {
+    operation = this.persist(envelope).then(({ inserted, cached }) => {
         if (inserted) this.accepted += 1;
+        else if (cached) this.cached += 1;
         else this.duplicates += 1;
         return inserted;
       })
@@ -44,6 +47,12 @@ export class DurableIntake {
     return operation;
   }
 
+  async persist(envelope) {
+    if (envelope.schemaVersion === 2 && this.reputationPolicyKey &&
+        await this.store.getReputation(envelope.userId, this.reputationPolicyKey)) return { inserted: false, cached: true };
+    return this.store.enqueue(envelope);
+  }
+
   reject(noteId, message, code) {
     this.rejected += 1;
     this.logger.warn("Durable intake rejected a note", { noteId, code });
@@ -54,7 +63,7 @@ export class DurableIntake {
   snapshot() {
     return {
       pending: this.inflight.size, capacity: this.capacity, rejected: this.rejected,
-      failed: this.failed, accepted: this.accepted, duplicates: this.duplicates,
+      failed: this.failed, accepted: this.accepted, duplicates: this.duplicates, cached: this.cached,
     };
   }
 

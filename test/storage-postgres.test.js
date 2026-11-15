@@ -25,6 +25,26 @@ if (!databaseUrl) {
       return store;
     }
 
+    test("shares the SFS cache and an isolated atomic provider quota across connections", async () => {
+      const namespace = `sfs-test-${randomUUID()}`;
+      const first = await openStore(namespace);
+      const second = await openStore(namespace);
+      await first.enqueue({ noteId: "sfs-note", userId: "sfs-user" });
+      const claim = await first.claim({ workerId: "sfs-worker", leaseMs: 10000 });
+      const key = "a".repeat(64);
+      const result = { status: "listed", score: 40, signals: [{ kind: "email", frequency: 10, confidence: 90, lastSeen: Math.floor(Date.now() / 1000) }] };
+      await first.saveReputation(claim, key, result, 60000);
+      expect(await second.getReputation("sfs-user", key)).toEqual(expect.objectContaining({ caseId: "sfs-note", result }));
+      const slots = await Promise.all(Array.from({ length: 8 }, (_, index) => (index % 2 ? first : second).tryReputationSlot(60000, 1)));
+      expect(slots.filter((wait) => wait === 0)).toHaveLength(1);
+      expect(await first.tryApiSlot(1)).toBe(0);
+      await second.blockReputationApi(10000);
+      expect(await first.tryReputationSlot(1, 1)).toBeGreaterThan(0);
+      expect(await first.reputationStats()).toEqual(expect.objectContaining({ apiRequests: 1, requestsToday: 1, cacheEntries: 1 }));
+      await first.fail(claim, { code: "RETRY", delayMs: 0 });
+      await expect(first.saveReputation(claim, key, result, 60000)).rejects.toThrow(/lease/);
+    });
+
     test("serializes first initialization across namespaces sharing the schema", async () => {
       const [first, second] = await Promise.all([
         openStore(`schema-init-a-${randomUUID()}`),

@@ -80,6 +80,7 @@ export class TieredModerationEngine {
           tier: moderationCase.tier,
           ruleIds: moderationCase.ruleIds,
           delayMs: this.reviewDelayMs,
+          ...(moderationCase.reputation ? { reputation: moderationCase.reputation } : {}),
         });
         await this.record("llm-review.queued", moderationCase, { actor: "deterministic" });
       }

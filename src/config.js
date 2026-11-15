@@ -40,6 +40,9 @@ export function loadConfig(env = process.env, workingDirectory = process.cwd()) 
   const namespace = env.AUTOMOD_NAMESPACE ?? createHash("sha256").update(normalizedUrl).digest("hex").slice(0, 32);
   if (!/^[a-zA-Z0-9_-]{1,64}$/u.test(namespace)) throw new Error("AUTOMOD_NAMESPACE must contain 1 to 64 letters, digits, underscores, or hyphens.");
   const dataDirectory = resolve(workingDirectory, env.AUTOMOD_DATA_DIR ?? "data");
+  const sfsEnabled = boolean(env.SFS_ENABLED ?? "false", "SFS_ENABLED");
+  const sfsCheckIp = boolean(env.SFS_CHECK_IP ?? "false", "SFS_CHECK_IP");
+  if (sfsCheckIp && !sfsEnabled) throw new Error("SFS_CHECK_IP requires SFS_ENABLED=true.");
 
   return {
     baseUrl: normalizedUrl,
@@ -49,6 +52,13 @@ export function loadConfig(env = process.env, workingDirectory = process.cwd()) 
     databaseUrl,
     namespace,
     role,
+    stopForumSpam: {
+      enabled: sfsEnabled, checkIp: sfsCheckIp,
+      intervalMs: integer(env.SFS_MIN_INTERVAL_MS ?? "1100", "SFS_MIN_INTERVAL_MS", 1, 60000),
+      maxDailyRequests: integer(env.SFS_MAX_DAILY_REQUESTS ?? "5000", "SFS_MAX_DAILY_REQUESTS", 1, 20000),
+      cacheTtlMs: integer(env.SFS_CACHE_TTL_MS ?? "21600000", "SFS_CACHE_TTL_MS", 60000, 86400000),
+      failureTtlMs: integer(env.SFS_FAILURE_TTL_MS ?? "300000", "SFS_FAILURE_TTL_MS", 1000, 3600000),
+    },
     workerConcurrency,
     sqlitePath: join(dataDirectory, "automod.sqlite"),
     maxInboxJobs: integer(env.MAX_INBOX_JOBS ?? "100000", "MAX_INBOX_JOBS", 1, 1_000_000),
@@ -84,4 +94,9 @@ function integer(value, name, minimum, maximum) {
     throw new Error(`${name} must be an integer from ${minimum} to ${maximum}.`);
   }
   return parsed;
+}
+
+function boolean(value, name) {
+  if (value !== "true" && value !== "false") throw new Error(`${name} must be true or false.`);
+  return value === "true";
 }

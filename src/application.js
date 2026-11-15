@@ -12,12 +12,16 @@ import { DurableApiLimiter } from "./rate-limiter.js";
 import { SharedHumanAuthority } from "./shared-authority.js";
 import { createStore } from "./storage/index.js";
 import { MisskeyStream } from "./stream.js";
+import { AccountReputation } from "./account-reputation.js";
+import { StopForumSpamClient } from "./stop-forum-spam.js";
+import { reputationPolicyKey } from "./reputation-policy.js";
 
 /** Bind all per-case writes to the worker's current lease. */
-export function createCaseHandler({ store, config, rules, sourceSha256, client, authority, logger, selfUserId, createEngine }) {
+export function createCaseHandler({ store, config, rules, sourceSha256, client, authority, logger, selfUserId, createEngine,
+  reputationPolicy = null, reputationService = null }) {
   const makeEngine = createEngine ?? ((options) => new TieredModerationEngine(options));
   return async (payload, context) => {
-    const envelope = validateInboxEnvelope(payload, { rules, sourceSha256, mode: config.mode });
+    const envelope = validateInboxEnvelope(payload, { rules, sourceSha256, mode: config.mode, reputationPolicy });
     if (envelope.userId === selfUserId) {
       const error = new Error("Inbox case targets the automod account.");
       error.code = "INVALID_ENVELOPE";
@@ -47,13 +51,40 @@ export function createCaseHandler({ store, config, rules, sourceSha256, client, 
       userStateMaxAgeMs: Math.max(5000, config.minimumActionIntervalMs + 2000),
     });
     const { caseId, noteId, userId, tier, ruleIds, reasons } = envelope;
-    return engine.processCase({ caseId, noteId, userId, tier, ruleIds, reasons });
+    const candidate = envelope.schemaVersion === 2;
+    if (!candidate) {
+      const succeeded = await engine.processCase({ caseId, noteId, userId, tier, ruleIds, reasons });
+      if (!succeeded || tier === "T1") return succeeded;
+    }
+    if (!config.stopForumSpam?.enabled || !reputationService) {
+      if (candidate) await ledger.record({ type: "case.completed", timestamp: new Date().toISOString(),
+        caseId, noteId, userId, actor: "deterministic", ruleIds: [], reason: "reputation_disabled", outcome: "skipped" });
+      return true;
+    }
+    const assessment = await reputationService.check(envelope, context);
+    const result = assessment.result;
+    const human = result.code === "HUMAN_DECISION";
+    await ledger.record({ type: human ? "automation.skipped.human" : "reputation.assessed",
+      timestamp: new Date().toISOString(), caseId, noteId, userId, actor: human ? "human" : "deterministic",
+      ruleIds: [reputationPolicy.id], reason: reputationPolicy.reason, outcome: result.status,
+      riskScore: result.score, reputation: { provider: "stopforumspam", ...result }, cached: assessment.cached });
+    if (candidate && result.status === "listed" && assessment.caseId === caseId && !human) {
+      return engine.processCase({ caseId, noteId, userId, tier: "T3", ruleIds: [reputationPolicy.id],
+        reasons: [reputationPolicy.reason], reputation: { provider: "stopforumspam", ...result } });
+    }
+    if (candidate) await ledger.record({ type: "case.completed", timestamp: new Date().toISOString(),
+      caseId, noteId, userId, actor: human ? "human" : "deterministic", ruleIds: [],
+      reason: "reputation_observation_complete", outcome: result.status });
+    return true;
   };
 }
 
 export async function runApplication(
-  { config, rules, sourceSha256, logger = new Logger(), signal }, dependencies = {},
+  { config, rules, sourceSha256, reputationPolicy = null, logger = new Logger(), signal }, dependencies = {},
 ) {
+  if (config.stopForumSpam?.enabled && !reputationPolicy?.enabled) {
+    throw new Error("SFS_ENABLED requires an enabled compiled account reputation policy.");
+  }
   if (config.mode === "enforce" && !config.t2RoleId && rules.some((rule) => rule.enabled && rule.tier === "T2")) {
     throw new Error("T2_ROLE_ID is required when an enabled T2 rule runs in enforce mode.");
   }
@@ -86,12 +117,22 @@ export async function runApplication(
     const authority = dependencies.authority ?? new SharedHumanAuthority({
       store, logger, localPath: config.storageBackend === "sqlite" ? join(config.dataDirectory, "human-overrides.json") : null,
     });
+    const sfs = config.stopForumSpam;
+    const policyKey = sfs?.enabled ? reputationPolicyKey(reputationPolicy, { sourceSha256, checkIp: sfs.checkIp }) : null;
+    const reputationService = sfs?.enabled ? dependencies.reputationService ?? new AccountReputation({
+      store, misskey: client, authority, policy: reputationPolicy, policyKey, checkIp: sfs.checkIp,
+      cacheTtlMs: sfs.cacheTtlMs, failureTtlMs: sfs.failureTtlMs,
+      userStateMaxAgeMs: Math.max(5000, config.minimumActionIntervalMs + 2000),
+      provider: dependencies.reputationProvider ?? new StopForumSpamClient({ budget: store,
+        intervalMs: sfs.intervalMs, maxDailyRequests: sfs.maxDailyRequests }),
+    }) : null;
     const health = new HealthState(config.mode, config.role);
     health.rulesLoaded = rules.length;
     const refresh = async () => {
       try {
         health.queue = await store.stats();
         health.api = limiter.snapshot();
+        health.reputation = sfs?.enabled ? { enabled: true, ...await store.reputationStats() } : { enabled: false };
         health.storageConnected = true;
       } catch (error) {
         health.storageConnected = false;
@@ -113,6 +154,7 @@ export async function runApplication(
     if (config.role !== "worker") {
       intake = new DurableIntake({
         store, rules, sourceSha256, mode: config.mode, selfUserId: me.id,
+        reputationPolicy: sfs?.enabled ? reputationPolicy : null, reputationPolicyKey: policyKey,
         maxPendingNotes: config.maxPendingNotes, logger,
         onStateChange: (snapshot) => { health.noteProcessing = snapshot; },
       });
@@ -135,7 +177,7 @@ export async function runApplication(
         store, concurrency: config.workerConcurrency, leaseMs: config.workLeaseMs, pollMs: config.workerPollMs,
         retryBaseMs: config.retryBaseMs, retryMaxMs: config.retryMaxMs, logger,
         handle: createCaseHandler({ store, config, rules, sourceSha256, client, authority, logger,
-          selfUserId: me.id, createEngine: dependencies.createEngine }),
+          selfUserId: me.id, createEngine: dependencies.createEngine, reputationPolicy, reputationService }),
         onStateChange: (snapshot) => { health.worker = snapshot; },
       });
       health.workerRunning = true;

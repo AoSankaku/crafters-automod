@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import generatedDocument from "../rules.generated.json";
 import { loadGeneratedRules } from "../src/generated-rules.js";
+import { loadReputationPolicy } from "../src/reputation-policy.js";
 
 describe("statically generated rules", () => {
   test("were generated from the current rules.md", async () => {
@@ -18,6 +19,7 @@ describe("statically generated rules", () => {
     expect(generatedDocument.schemaVersion).toBe(2);
     expect(Array.isArray(rules)).toBe(true);
     expect(Object.isFrozen(rules)).toBe(true);
+    expect(loadReputationPolicy(generatedDocument)).toEqual(expect.objectContaining({ id: "stopforumspam-account", tier: "T3" }));
   });
 
   test("accepts a complete safe generated rule", () => {
