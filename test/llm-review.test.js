@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "#test";
 
 import { resolveEffectiveDecision, validateLlmReview } from "../src/llm-review.js";
 

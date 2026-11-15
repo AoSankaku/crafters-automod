@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, mock, test } from "#test";
 
 import { MisskeyApiClient, MisskeyApiError } from "../src/misskey.js";
 import { buildStreamingUrl, MisskeyStream, parseStreamNote } from "../src/stream.js";
@@ -18,7 +18,7 @@ describe("MisskeyApiClient", () => {
     expect(JSON.parse(request.body)).toEqual({ userId: "user-1", text: "Existing human note\nAutomod log" });
   });
   test("uses bearer authentication and the moderator delete endpoint", async () => {
-    const fetchImpl = mock(async () => new Response("{}", { status: 204 }));
+    const fetchImpl = mock(async () => new Response(null, { status: 204 }));
     const client = new MisskeyApiClient({
       baseUrl: "https://misskey.example/",
       token: "secret-token",

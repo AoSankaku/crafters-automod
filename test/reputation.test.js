@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, mock, test } from "#test";
 import { loadReputationPolicy, evaluateReputation, reputationPolicyKey } from "../src/reputation-policy.js";
 import { AccountReputation } from "../src/account-reputation.js";
 

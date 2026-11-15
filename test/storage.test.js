@@ -1,5 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
+import { afterAll, describe, expect, test } from "#test";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,6 +10,7 @@ import {
   QueueCapacityError,
   StorageError,
 } from "../src/storage/index.js";
+import { openSQLite } from "../src/storage/drivers.js";
 
 const directories = [];
 const stores = [];
@@ -495,9 +495,9 @@ describe("durable moderation store (SQLite)", () => {
     await existing.close();
     stores.splice(stores.indexOf(existing), 1);
 
-    const database = new Database(join(directory, "state.sqlite"));
+    const database = await openSQLite(join(directory, "state.sqlite"), { create: true, readwrite: true });
     database.exec("DROP TABLE automod_reputation_cache; DROP TABLE automod_reputation_budget;");
-    database.close();
+    await database.close();
 
     const reopened = await open({ namespace: "legacy", requireExisting: true });
     expect(await reopened.reputationStats()).toEqual({

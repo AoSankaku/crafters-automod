@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, mock, test } from "#test";
 import { createCaseHandler, runApplication } from "../src/application.js";
 import { AccountReputation } from "../src/account-reputation.js";
 import { loadConfig } from "../src/config.js";
@@ -6,6 +6,7 @@ import { DurableIntake } from "../src/durable-intake.js";
 import { DurableWorker } from "../src/durable-worker.js";
 import { loadReputationPolicy, reputationPolicyKey } from "../src/reputation-policy.js";
 import { createStore } from "../src/storage/index.js";
+import { setTimeout as delay } from "node:timers/promises";
 
 const logger = { info() {}, warn() {}, error() {} };
 const sourceSha256 = "a".repeat(64);
@@ -69,7 +70,7 @@ describe("Stop Forum Spam durable integration", () => {
           for (let attempt = 0; attempt < 100; attempt += 1) {
             finalStats = await h.store.stats();
             if (finalStats.completed === 1) { controller.abort(); return; }
-            await Bun.sleep(10);
+            await delay(10);
           }
           throw new Error("Durable reputation work did not complete");
         } }),

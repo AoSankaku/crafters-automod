@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "#test";
 import { createCaseHandler } from "../src/application.js";
 import { loadConfig } from "../src/config.js";
 import { createInboxEnvelope } from "../src/inbox-envelope.js";
@@ -7,6 +7,7 @@ import { MisskeyApiClient } from "../src/misskey.js";
 import { DurableApiLimiter } from "../src/rate-limiter.js";
 import { SharedHumanAuthority } from "../src/shared-authority.js";
 import { createStore } from "../src/storage/index.js";
+import { setTimeout as delay } from "node:timers/promises";
 
 const logger = { warn() {}, info() {}, error() {} };
 const sourceSha256 = "a".repeat(64);
@@ -48,7 +49,7 @@ describe("default Misskey moderation-note workflow", () => {
     const h = await fixture(tier);
     try {
       await h.worker().processOne();
-      expect(h.user.moderationNote).toStartWith("Human memo: keep this.\n");
+      expect(h.user.moderationNote.startsWith("Human memo: keep this.\n")).toBe(true);
       expect(h.user.moderationNote).toContain(tier);
       expect(h.user.moderationNote).toContain("policy-rule");
       expect(h.user.moderationNote).toContain("Policy reason");
@@ -85,7 +86,7 @@ describe("default Misskey moderation-note workflow", () => {
       h.rejectNextLog();
       await h.worker().processOne();
       expect(await h.store.hasProcessed("note")).toBe(false);
-      await Bun.sleep(10);
+      await delay(10);
       await h.worker().processOne();
       const endpoint = tier === "T1" ? "admin/suspend-user" : "admin/roles/assign";
       expect(h.calls.filter((call) => call === endpoint)).toHaveLength(1);

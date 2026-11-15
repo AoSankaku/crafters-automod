@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { resolve as resolvePath } from "node:path";
-import { SQL } from "bun";
-import { Database } from "bun:sqlite";
+import { openPostgres, openSQLite } from "./drivers.js";
 
 export class StorageError extends Error {
   constructor(message = "Durable storage operation failed.") {
@@ -357,7 +356,7 @@ export async function createStore(options = {}) {
 
     if (backend === "sqlite") {
       const sqlitePath = requiredString(options.sqlitePath, "SQLite path");
-      database = new Database(sqlitePath, {
+      database = await openSQLite(sqlitePath, {
         create: !requireExisting,
         readwrite: true,
       });
@@ -366,7 +365,7 @@ export async function createStore(options = {}) {
       options.sqliteMutex = sqliteMutex(sqlitePath === ":memory:" ? randomUUID() : resolvePath(sqlitePath));
     } else if (backend === "postgres") {
       const databaseUrl = requiredString(options.databaseUrl, "PostgreSQL URL");
-      sql = new SQL(databaseUrl, { max: 5, connectionTimeout: 5 });
+      sql = await openPostgres(databaseUrl, { max: 5, connectionTimeout: 5 });
     } else {
       throw new StorageError("Storage backend must be sqlite or postgres.");
     }

@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, mock, test } from "#test";
 import { createCaseHandler } from "../src/application.js";
 import { loadConfig } from "../src/config.js";
 import { createInboxEnvelope } from "../src/inbox-envelope.js";

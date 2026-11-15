@@ -1,14 +1,16 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "#test";
+import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 
-import generatedDocument from "../rules.generated.json";
+import generatedDocument from "../rules.generated.json" with { type: "json" };
 import { loadGeneratedRules } from "../src/generated-rules.js";
 import { loadReputationPolicy } from "../src/reputation-policy.js";
 
 describe("statically generated rules", () => {
   test("were generated from the current rules.md", async () => {
-    const source = await Bun.file(new URL("../rules.md", import.meta.url)).text();
+    const source = await readFile(new URL("../rules.md", import.meta.url), "utf8");
     const normalizedSource = new TextEncoder().encode(source.replace(/\r\n/gu, "\n"));
-    const sourceSha256 = new Bun.CryptoHasher("sha256").update(normalizedSource).digest("hex");
+    const sourceSha256 = createHash("sha256").update(normalizedSource).digest("hex");
 
     expect(generatedDocument.sourceSha256).toBe(sourceSha256);
   });

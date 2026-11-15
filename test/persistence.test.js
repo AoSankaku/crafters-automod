@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "#test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -44,7 +45,7 @@ describe("persistent moderation state", () => {
     const append = mock(async (target, contents) => {
       attempts += 1;
       if (attempts === 1) throw new Error("disk temporarily unavailable");
-      return Bun.write(target, contents);
+      return writeFile(target, contents);
     });
     const ledger = new JsonlAuditLedger(path, { append });
     await ledger.initialize();
@@ -56,7 +57,7 @@ describe("persistent moderation state", () => {
 
     expect(ledger.hasProcessed("note-1")).toBe(true);
     expect(append).toHaveBeenCalledTimes(2);
-    expect((await Bun.file(path).text()).trim().split("\n")).toHaveLength(1);
+    expect((await readFile(path, "utf8")).trim().split("\n")).toHaveLength(1);
   });
 
   test("does not enqueue the same durable job twice", async () => {
@@ -67,7 +68,7 @@ describe("persistent moderation state", () => {
     await queue.enqueue({ caseId: "case-1", userId: "user-1" });
     await queue.enqueue({ caseId: "case-1", userId: "user-1" });
 
-    expect((await Bun.file(path).text()).trim().split("\n")).toHaveLength(1);
+    expect((await readFile(path, "utf8")).trim().split("\n")).toHaveLength(1);
   });
 
   test("retries a job after a transient append failure without duplicating concurrent work", async () => {
@@ -77,7 +78,7 @@ describe("persistent moderation state", () => {
     const append = mock(async (...args) => {
       attempts += 1;
       if (attempts === 1) throw new Error("disk temporarily unavailable");
-      return Bun.write(args[0], args[1]);
+      return writeFile(args[0], args[1]);
     });
     const queue = new JsonlJobQueue(path, { append });
     await queue.initialize();
@@ -87,7 +88,7 @@ describe("persistent moderation state", () => {
     await Promise.all([queue.enqueue(job), queue.enqueue(job)]);
 
     expect(append).toHaveBeenCalledTimes(2);
-    expect((await Bun.file(path).text()).trim().split("\n")).toHaveLength(1);
+    expect((await readFile(path, "utf8")).trim().split("\n")).toHaveLength(1);
   });
 
   test("fails closed when a durable queue reaches its configured capacity", async () => {
@@ -109,7 +110,7 @@ describe("persistent moderation state", () => {
     const append = mock(
       () =>
         new Promise((resolve) => {
-          releaseAppend = async () => resolve(await Bun.write(path, `${JSON.stringify({ caseId: "case-1", userId: "user-1" })}\n`));
+          releaseAppend = async () => resolve(await writeFile(path, `${JSON.stringify({ caseId: "case-1", userId: "user-1" })}\n`));
         }),
     );
     const queue = new JsonlJobQueue(path, { append, maxJobs: 1 });
@@ -123,7 +124,7 @@ describe("persistent moderation state", () => {
     await Promise.all([first, duplicate]);
 
     expect(append).toHaveBeenCalledTimes(1);
-    expect((await Bun.file(path).text()).trim().split("\n")).toHaveLength(1);
+    expect((await readFile(path, "utf8")).trim().split("\n")).toHaveLength(1);
   });
 
   test("human overrides take priority and malformed override state fails closed", async () => {

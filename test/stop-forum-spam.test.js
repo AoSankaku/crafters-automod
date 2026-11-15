@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, mock, test } from "#test";
 import { StopForumSpamClient, SfsUnavailableError, isPublicIp } from "../src/stop-forum-spam.js";
 
 const response = (data, status = 200, headers = {}) => new Response(JSON.stringify(data), { status, headers });

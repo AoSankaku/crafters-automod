@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, mock, test } from "#test";
 import { DurableIntake } from "../src/durable-intake.js";
 
 const note = { id: "note-1", userId: "user-1", user: { id: "user-1", host: null }, text: "spam private content" };

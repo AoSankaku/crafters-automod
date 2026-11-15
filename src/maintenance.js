@@ -16,7 +16,7 @@ export async function applyOverride(config, args, open = createStore) {
   for (let index = 0; index < args.length; index += 2) {
     const key = args[index];
     if (!["--scope", "--id", "--reason"].includes(key) || !args[index + 1] || options[key]) {
-      throw new Error("Usage: bun run override --scope case|note|user --id ID --reason REASON");
+      throw new Error("Usage: pnpm run override --scope case|note|user --id ID --reason REASON");
     }
     options[key] = args[index + 1];
   }

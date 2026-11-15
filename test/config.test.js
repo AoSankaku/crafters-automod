@@ -1,6 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "#test";
 
 import { loadConfig } from "../src/config.js";
+import { resolve } from "node:path";
 
 describe("loadConfig", () => {
   test("enables moderation-note logging by default with validated language and opt-out", () => {
@@ -36,7 +37,7 @@ describe("loadConfig", () => {
     expect(config.maxPendingNotes).toBe(1_000);
     expect(config.reviewDelayMs).toBe(900_000);
     expect(config.t2RoleId).toBeNull();
-    expect(config.dataDirectory.toLowerCase()).toEndWith("automod\\data");
+    expect(config.dataDirectory).toBe(resolve("C:\\automod", "data"));
   });
 
   test("rejects missing secrets and unsafe URL components", () => {

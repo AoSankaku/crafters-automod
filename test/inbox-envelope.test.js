@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "#test";
 import { createInboxEnvelope, validateInboxEnvelope } from "../src/inbox-envelope.js";
 
 const sourceSha256 = "a".repeat(64);

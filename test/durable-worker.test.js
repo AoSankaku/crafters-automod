@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, mock, test } from "#test";
 import { DurableWorker } from "../src/durable-worker.js";
 
 const claim = { id: "note-1", noteId: "note-1", userId: "user-1", token: "lease-1", attempts: 1, payload: { noteId: "note-1" } };

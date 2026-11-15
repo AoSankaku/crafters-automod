@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { execFileSync, spawnSync } from "node:child_process";
+import { afterEach, describe, expect, test } from "#test";
+import { spawnSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -7,7 +7,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createStore } from "../src/storage/index.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const node = execFileSync("node", ["-p", "process.execPath"], { encoding: "utf8" }).trim();
+const nodeProbe = spawnSync("node", ["-p", "process.execPath"], { encoding: "utf8" });
+const node = nodeProbe.status === 0 ? nodeProbe.stdout.trim() : null;
 const directories = [];
 async function directory() {
   const path = await mkdtemp(join(tmpdir(), "automod-node-"));
@@ -30,7 +31,7 @@ function runNode(source, { cwd = root, env = {} } = {}) {
 }
 const storageUrl = pathToFileURL(join(root, "src/storage/index.js")).href;
 
-describe("Node runtime without Bun", () => {
+(node ? describe : describe.skip)("Node runtime without Bun", () => {
   test("persists SQLite authority and action state readable by either runtime", async () => {
     const sqlitePath = join(await directory(), "automod.sqlite");
     runNode(`import { createStore } from ${JSON.stringify(storageUrl)};

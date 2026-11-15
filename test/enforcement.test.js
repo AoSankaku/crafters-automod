@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, mock, test } from "#test";
 
 import { HumanDecisionError, ModerationEnforcer } from "../src/enforcement.js";
 import { MisskeyApiError } from "../src/misskey.js";

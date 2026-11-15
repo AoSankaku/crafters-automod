@@ -1,4 +1,5 @@
-import generatedDocument from "../rules.generated.json";
+import generatedDocument from "../rules.generated.json" with { type: "json" };
+import { loadEnvironment } from "./environment.js";
 import { runApplication } from "./application.js";
 import { loadConfig } from "./config.js";
 import { loadGeneratedRules } from "./generated-rules.js";
@@ -6,6 +7,7 @@ import { Logger } from "./logger.js";
 import { loadReputationPolicy } from "./reputation-policy.js";
 
 async function main() {
+  loadEnvironment();
   const logger = new Logger();
   const config = loadConfig();
   const rules = loadGeneratedRules(generatedDocument);

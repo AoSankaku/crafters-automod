@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, mock, test } from "#test";
 
 import { DurableApiLimiter } from "../src/rate-limiter.js";
 

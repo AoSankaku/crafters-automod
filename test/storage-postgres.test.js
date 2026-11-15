@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "#test";
 import { randomUUID } from "node:crypto";
 import { createStore, StorageError } from "../src/storage/index.js";
 

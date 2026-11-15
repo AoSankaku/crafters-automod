@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "#test";
 
 import { findMatchingRules, noteFieldValue } from "../src/matcher.js";
 

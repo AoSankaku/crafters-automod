@@ -1,8 +1,10 @@
 import { loadConfig } from "./config.js";
+import { loadEnvironment } from "./environment.js";
 import { applyOverride, migrateToPostgres, storeOptions } from "./maintenance.js";
 import { createStore } from "./storage/index.js";
 
 try {
+  loadEnvironment();
   const config = loadConfig();
   const [command, ...args] = process.argv.slice(2).filter((arg) => arg !== "--");
   if (command === "override") {
