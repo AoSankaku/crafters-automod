@@ -1,114 +1,180 @@
 # Crafters Automod for Misskey
 
-Misskey のローカルタイムラインを監視し、人間が記述した `rules.md` から静的生成したフィルタで T1/T2/T3 に分類する常駐サービスです。人間の管理判断を最優先し、T2/T3 は遅延 LLM 監査用キューへ送ります。ノート受信時の判定に LLM は使いません。
+Misskeyのローカルタイムラインを監視する、サーバー運営者向けのモデレーションサービスです。人間が書いたポリシーを静的なルールへ変換し、投稿をT1/T2/T3に分類します。任意でStop Forum Spam（SFS）のアカウント評判も参照できます。
 
-詳細な設計と現在の実装境界は [docs/architecture.md](docs/architecture.md) を参照してください。
+小規模では**Misskeyと同じホスト・SQLite・1プロセス**で動かせます。大規模では**Automod専用PostgreSQL・受信プロセス・複数ワーカー**に分離できます。MisskeyのDBやRedisへ直接接続する必要はありません。
 
-小規模ではMisskeyと同じホストで、Bun内蔵SQLiteと1プロセスだけで実行できます。大規模ではAutomod専用PostgreSQLを共有し、受信と複数ワーカーを別ホストへ分離できます。[同居・分散配置と移行手順](docs/deployment.md)に設定例を用意しています。
+**初期状態は`dry-run`、本文フィルター0件、SFS照会無効です。** 起動しただけで任意のスパムを検出する学習済みモデルではありません。サーバーの規約と確認済みの事例に基づいてルールを設定してください。
 
-## 判定モデル
+## 実装済みの機能と現在の制限
 
-| 区分 | 意味 | 即時処理 | 遅延処理 |
+| 機能 | 状態 |
+|---|---|
+| 静的ルールによる分類、T1凍結、T2ロール付与、T3記録 | 実装済み。実際の制裁は`enforce`時のみ |
+| 永続受信キュー、重複防止、ユーザー単位排他、再試行 | SQLite / PostgreSQLに対応 |
+| 人間オーバーライド、操作ジャーナル、監査 | 実装済み |
+| 共有APIレート制御、SFSのキャッシュ・日次予算 | 実装済み |
+| 遅延LLM監査 | ジョブ保存と出力検証まで。実行ワーカーは未接続 |
+| T1の過去投稿全削除 | ジョブ保存まで。Misskey側の検証済み管理API / ワーカーが必要 |
+
+**凍結やロール付与は動作しますが、LLMによる再判定や過去投稿全削除は自動実行されません。** LLMプロバイダーを設定するだけで有効になる実装でもありません。
+
+公開APIの`users/notes`で過去投稿全件の削除を代用する機能はありません。全削除の実行には、フォロワー限定・ダイレクト投稿も扱えるMisskey側の管理APIまたはサーバー内ワーカーを確認して接続する必要があります。
+
+`localTimeline`には停止・切断中の遡及取得がなく、Home・フォロワー限定・ダイレクト投稿を全件網羅しません。永続化はDBへの保存成功後からです。全投稿の確実な検査にはMisskey側の永続イベント連携が別途必要です。
+
+## 判断基準
+
+| 区分 | 選ぶ基準 | `enforce`時の処理 | 遅延処理 |
 |---|---|---|---|
-| T1 | 誰が見ても明白なスパム・迷惑行為 | アカウント凍結、削除ジョブ記録 | 運用監査 |
-| T2 | 強い制限を必要とする疑い | 制限用ロール付与 | 利用規約に照らした LLM 監査 |
-| T3 | 記録して経過を見る事象 | 監査記録のみ | 利用規約に照らした LLM 監査 |
+| **T1** | 文脈判断がなくても明白な重大スパム・有害行為。人間のポリシーが明確に指定した場合 | ローカルアカウントを凍結し、成功確認後に過去投稿削除ジョブを保存 | 削除ジョブは現在未消費 |
+| **T2** | 強い制限が必要とポリシーで指定された条件 | 設定済みの制限用手動ロールを付与。凍結・削除はしない | LLMレビュー用ジョブを保存 |
+| **T3** | 不確実な兆候、経過観察、SFSの有効な一致 | 自動制限を行わず記録 | LLMレビュー用ジョブを保存 |
 
-権限の優先順位は「人間の管理判断 > 現在の Misskey 状態 > 静的ルール > LLM 推奨」です。LLM は T1 を決定できず、不確かな結果は人間レビューへ送る前提です。
+判断が曖昧なら、より影響の小さい区分を選びます。新規ルールは明確な上位指定がなければT3です。複数の本文ルールが一致した場合は`T1 > T2 > T3`の最も強い区分を使い、一致したルールID・理由を記録します。
 
-```text
-rules.md（人間向けの自然言語）
-       ↓ この会話で確認・静的生成
-rules.generated.json（固定フィルタ、T1/T2/T3）
-       ↓ テスト・ビルド・再起動
-Automod（LLMなしで即時分類）
-       ├─ T1: 凍結 + 過去投稿削除キュー
-       ├─ T2: 制限ロール + 遅延監査キュー
-       └─ T3: 記録 + 遅延監査キュー
+優先順位は**人間の判断 > 既存のMisskey管理状態 > 静的ルール > LLM推奨**です。管理者・モデレーターを自動制裁しません。LLMはT1を発動できず、SFSの点数もT1/T2へ自動変換しません。
+
+通信断などで制裁の送信結果が不明になった場合は、同じ操作を盲目的に繰り返さず、人間の確認が必要な監査記録を残します。Misskey管理画面の操作との完全な原子性は保証できないため、人間が処置する際は先に[オーバーライド](#人間による優先判断)を登録してください。
+
+## 最短の導入手順：Misskeyと同居
+
+必要なものはBun、接続可能なMisskey、専用のローカルモデレーターアカウントです。外部npm依存はありません。`package.json`とDockerfileはBun 1.3.14を指定し、直近の開発検証はBun 1.4.4で行っています。
+
+### 1. 取得と環境設定
+
+```sh
+git clone https://github.com/AoSankaku/crafters-automod.git
+cd crafters-automod
+cp .env.example .env
 ```
 
-`rules.md` は実行時に読み込まれません。編集後は、この会話で「`rules.md` を反映してください」と依頼してください。生成物には元ファイルの SHA-256 が記録され、更新漏れがあるとビルドが失敗します。`rules.generated.json` は手動編集しないでください。
+PowerShellではコピーを次のように実行できます。
 
-## 現在の実装範囲
+```powershell
+Copy-Item -LiteralPath .env.example -Destination .env
+```
 
-静的分類、SQLite/PostgreSQLの永続受信キューと監査、ノートIDによる共有重複防止、リース付きワーカーとユーザー単位排他、T1凍結、T2ロール付与、T2/T3遅延監査ジョブ、人間判断の再確認、共有APIレート制御と429待機、有限回の遅延再試行を実装しています。本文は受信時に分類し、キューには本文を含まない固定の判定結果だけを保存します。
+プライベートリポジトリの取得にはGitHubの認証が必要です。`.env`を編集し、まず次の設定を確認してください。
 
-次の2つは安全上、キューへの永続化までで、ワーカーはまだ接続していません。
+```ini
+MISSKEY_URL=http://127.0.0.1:3000
+MISSKEY_TOKEN=replace-with-a-moderator-token
+AUTOMOD_MODE=dry-run
+AUTOMOD_BACKEND=sqlite
+AUTOMOD_ROLE=all
+WORKER_CONCURRENCY=1
+AUTOMOD_DATA_DIR=data
+SFS_ENABLED=false
+```
 
-- LLM 監査: 利用するプロバイダー、モデル、実際の利用規約が未指定です。出力検証器は T1 推奨を拒否します。
-- T1 の過去投稿全削除: 公開 API の `users/notes` ではモデレーターでもフォロワー限定・ダイレクト投稿を網羅できません。全削除を保証するには Misskey 本体側の管理 API またはサーバー内ワーカーが必要です。
+`MISSKEY_URL`は実際のAPI・WebSocket両方へ到達できるURLに変更します。同居でもMisskeyがそのアドレスで待ち受けていなければ接続できません。
 
-この Automod が受信する `localTimeline` も、停止中・切断中の投稿を遡らず、Home、フォロワー限定、ダイレクト投稿をサーバー全体から網羅しません。全投稿検査が必要なら Misskey 本体に投稿フックを追加してください。
+専用トークンには、ユーザー照会`admin/show-user`、T1を使う場合は`admin/suspend-user`、T2を使う場合は`admin/roles/assign`に必要な権限を用意します。T2の制限内容はMisskey側の手動ロールで設定し、IDを`T2_ROLE_ID`へ指定します。T2を有効なルールとして`enforce`する場合、このIDは必須です。
 
-## Stop Forum Spamによる警戒
+### 2. ルール設定とビルド
 
-Stop Forum Spamの掲載情報を追加の警戒材料にできます。確認済みメールをハッシュ照会し、最近の十分な一致があればT3として観察します。一致だけではロール変更・凍結・削除を行いません。既定は外部送信なしで、`SFS_ENABLED=true`により有効化します。IP照会は別途明示的な設定と追加権限が必要です。キャッシュ・日次予算はSQLite/PostgreSQLの両構成で共有します。[照会範囲・基準・運用設定](docs/stop-forum-spam.md)を参照してください。
-
-## セットアップ
-
-1. Misskey 上に Automod 専用のローカルアカウントを作り、モデレーターに設定します。
-2. 管理 API に必要な権限を持つアクセストークンを発行します。少なくともユーザー確認、凍結、ロール付与に対応する権限が必要です。
-3. T2 用の制限ロールを Misskey に作成し、そのロール ID を `T2_ROLE_ID` に設定します。
-4. `.env.example` を `.env` にコピーし、`MISSKEY_URL` と `MISSKEY_TOKEN` を設定します。
-5. `rules.md` に自然な日本語でポリシーを書き、この会話に静的生成を依頼します。
-6. 最初は `AUTOMOD_MODE=dry-run` のまま起動します。
-
-ローカルで起動する場合:
+[ルールの設定方法](#ルールの設定方法)に従って`rules.md`と生成物を更新します。本文フィルターをまだ設定しない場合でも接続確認はできますが、SFSも無効なら分類対象はありません。
 
 ```sh
 bun run build
 bun start
 ```
 
-Docker で Misskey と一緒に常駐させる場合:
+Bunが作業ディレクトリの`.env`を読み込みます。ビルドは生成ポリシーの整合性を検査し、`dist/index.js`と管理用`dist/cli.js`を作ります。
+
+### 3. 確認してから制裁を有効化
 
 ```sh
-docker compose up -d --build
-docker compose logs -f automod
+curl --fail http://127.0.0.1:8787/health
+bun run status
 ```
 
-Automod が Docker 内、Misskey がホスト上で動く場合、`.env` の URL はたとえば `http://host.docker.internal:3000` にします。同じ Compose ネットワークに組み込む場合は、Misskey のサービス名に合わせて `http://misskey:3000` のように設定してください。`restart: unless-stopped` により Docker 起動後と異常終了後に再起動します。`./data` はコンテナの `/app/data` に永続化されます。
+ログと監査を見て、誤検知がないこと、T2ロールが意図した権限になっていることを確認します。最初はT3・dry-runで観察し、T1/T2は対象と理由を十分に確認してから使ってください。
 
-### systemd で常駐させる場合
+`enforce`へ切り替える際は、受信を止め、旧モードのworkerで未完了ケースを処理してから、全プロセスの`AUTOMOD_MODE=enforce`をそろえて再起動します。**dry-runで受理済みの同じノートIDを、切り替え後に再制裁することはありません。** 新しいモードは新規に受理する投稿に適用します。
 
-Dockerは必須ではありません。Misskeyをsystemdで運用している場合も、Automodを専用ユーザーの独立したsystemdサービスとして起動できます。Misskeyと同じプロセスや実行ユーザーにはせず、`MISSKEY_URL=http://127.0.0.1:3000` などでMisskeyのAPIへ接続します。
+常駐化する場合は[systemd手順](docs/systemd.md)を使えます。Misskeyとは別サービス・専用ユーザーで実行します。
 
-同梱unit、環境ファイル、権限、永続データ、起動・更新・監視の手順は [systemd での常駐運用](docs/systemd.md) を参照してください。
+## ルールの設定方法
 
-## `rules.md` の書き方
+`rules.md`は人間向けのポリシー、`rules.generated.json`は唯一の実行用ルールです。サービスは実行時に自然言語を解釈せず、LLMへ投稿判定を依頼しません。
 
-専用構文はありません。通常の日本語で次の情報を書いてください。
+```text
+rules.md
+  → 静的生成・人間による確認
+  → rules.generated.json（元ファイルのSHA-256付き）
+  → テスト・ビルド・再起動
+  → 受信時の固定ルール判定
+```
 
-- T1/T2/T3 のどれか
-- 対象: 本文、CW、ユーザー名、添付ファイル名など
-- 条件: 含まれる語句、表記揺れ、正規表現相当の条件など
-- 除外対象: 管理者、公式 bot、特定ユーザーなど
-- 判定理由: 後から人間が監査できる具体的な説明
+専用の自動コンパイラコマンドはありません。`rules.md`を編集したら、Codex等の開発支援環境へ「rules.mdを反映し、生成物・テスト・ビルドを更新してください」と依頼し、生成結果を確認してください。生成物だけを手で変える運用は避けます。元ファイルとのハッシュ不一致はビルドで検出します。
 
-例:
+ポリシーには、区分、対象、条件、除外対象、判定理由を書きます。例えば、最初は次のようなT3ルールから始められます。
 
 ```markdown
 ## 有効なルール
 
-- T1: 本文または CW に既知の大量投稿型スパム文言が含まれ、既知の誘導 URL も含む場合。
-  trusted_user と official_bot は除外する。理由は複数の確定的指標が一致する宣伝スパム。
-- T2: ユーザー名が spam_ で始まり、本文にフォロワー購入の勧誘がある場合。
-  理由は強い制限を行い、後で利用規約に照らして監査するため。
-- T3: 同一文面の短時間反復を示す語句がある場合。
-  理由は自動制限せず傾向を記録するため。
+- T3: 本文またはCWに「フォロワー購入」という語句がある場合。
+  trusted_user と official_bot は除外する。
+  理由は、勧誘の文脈を人間が確認するため。
 ```
 
-重大度が曖昧な場合は静的生成前に確認します。特に指定がなければ、安全側の T3 として生成します。複数ルールが一致した場合は `T1 > T2 > T3` の順で最も強い区分を1回だけ適用します。
+これは記述例で、READMEへ書かれた例は実行ルールにはなりません。文脈が必要な語句を、単独でT1の根拠にしないでください。
+
+| フィールド | 判定対象 |
+|---|---|
+| `content` | 本文、CW、添付ファイル名・説明、アンケート選択肢 |
+| `text` | 本文 |
+| `cw` | CW |
+| `username` | ローカルユーザー名 |
+| `filename` | 添付ファイル名・説明 |
+
+部分一致は大文字小文字を区別しません。同じルールの複数matcherはOR条件です。複数条件の同時成立が必要な場合は、その意図をポリシーと生成結果の両方で確認してください。正規表現は長さ500文字までで、バックリファレンス、後読み、代表的なネスト量指定子を拒否します。
+
+稼働中のルール更新も、受信停止・旧ケース処理・全workerの同時更新を基本とします。ポリシーハッシュやモードが一致しないキューのケースは、別の基準で再解釈せずdeadへ送ります。
+
+## Stop Forum Spamの基準と使い方
+
+外部照会を許可する場合に限り、次を設定します。
+
+```ini
+SFS_ENABLED=true
+SFS_CHECK_IP=false
+```
+
+確認済みメールをtrim・小文字化したMD5で照会します。平文メール、ユーザー名、ノート本文はSFSへ送りません。MD5は匿名化ではなく、Gmailの別名等の正規化を取りこぼす場合もあります。**dry-runでもSFSを有効にすると外部照会は実行します。**
+
+現在の生成ポリシーでは、次の3条件すべてを満たす一致を加点します。
+
+| 条件・得点 | 設定値 |
+|---|---|
+| 最終報告 | 90日以内 |
+| 報告回数 | 3回以上 |
+| SFS confidence | 75以上 |
+| メール一致 | 40点 |
+| IP一致 | 20点 |
+
+有効な一致はT3の観察・レビュー対象です。点数が高くてもSFSだけでT2/T1にはしません。confidenceは本人がスパマーである確率とは扱いません。本文ルールがなくても、受信したローカル投稿のアカウントを確認できます。登録時の全件走査はしません。
+
+IPを使う場合は`SFS_CHECK_IP=true`も必要です。専用の`admin/get-user-ips`が返す最近の公開IPを最大1件、SFSへHTTPS送信します。追加の管理者権限が必要で、共有IP・過去の利用者による誤検知もあり得ます。失敗ログインのIPは使いません。
+
+照会結果は既定6時間再利用し、同じユーザーを投稿ごとに再照会・再レビューしません。SFSのAPI予算はMisskeyと別に全workerで共有し、既定は最小1100ms・UTC日単位5000回です。429/503は共有待機を設定します。障害や予算不足は未確認として記録し、静的判定を継続します。
+
+[外部送信範囲、キャッシュ、日次上限、詳細な設定](docs/stop-forum-spam.md)を確認してから有効化してください。
 
 ## 人間による優先判断
 
-SQLite単体構成では`data/human-overrides.json`を各操作の直前に再読込します。共有DBへ判断を登録するCLIも両構成で利用できます。人間判断があるケースやユーザーは自動処理を中止します。オーバーライドファイルが壊れている場合も安全側に停止します。
+人間が処置する前に、同じ環境設定で対象を登録します。
 
 ```sh
 bun run override --scope user --id USER_ID --reason "Moderator resolved the case"
+bun run override --scope case --id NOTE_ID --reason "Human decision"
 ```
 
-分散構成では必ずこのCLIを使い、全プロセスで同じDBとnamespaceを指定します。Misskey管理画面の変更を自動同期する機能は未実装です。
+scopeは`user`、`case`、`note`です。case IDはノートIDと同じです。これは以後の自動変更を禁止する判断で、完了した凍結・ロール付与を取り消すコマンドではありません。復元はMisskey側で行います。管理画面の変更を自動的に共有DBへ同期する機能は未実装です。
+
+SQLite単体構成では`data/human-overrides.json`も各操作の直前に再読込します。不正なファイルは安全側に停止します。PostgreSQL構成では共有DBへ登録するCLIを使ってください。
 
 ```json
 {
@@ -118,67 +184,86 @@ bun run override --scope user --id USER_ID --reason "Moderator resolved the case
 }
 ```
 
-受信ケース、監査、遅延レビュー・削除ジョブ、完了ID、操作ジャーナル、人間判断、API予算を同じDBへ保存します。既定は`data/automod.sqlite`です。旧JSONLはSQLite初回起動時に取り込み、元ファイルも残します。本文やトークンは保存しません。
+## 配置を選ぶ
 
-`MAX_INBOX_JOBS`（既定10万件）は未完了・処理中・deadの合計上限、`MAX_QUEUED_JOBS`はレビュー・削除キューそれぞれの上限です。`MAX_PENDING_NOTES`（既定1,000件）はDB保存待ちのメモリ上限で、到達や保存失敗時には受信を停止します。保存済みケースは再起動後に再開し、完了IDは重複防止用に保持します。監査・完了IDの自動アーカイブは未実装なので、DB総容量は別途監視してください。
+| 構成 | 用途 | 設定 |
+|---|---|---|
+| SQLite単体 | Misskeyと同居、または専用ホストで1プロセス | `AUTOMOD_BACKEND=sqlite`、`AUTOMOD_ROLE=all`、並列数1 |
+| PostgreSQL分散 | 受信と複数workerを分離 | `AUTOMOD_BACKEND=postgres`、共通DB・namespace、`ingest` / `worker` |
 
-大規模構成の例:
+SQLiteはローカルディスクに置き、複数ホストやNFSで共有しません。PostgreSQLはMisskeyのDBから分けたAutomod専用DBを使います。全プロセスでルール、モード、トークンのアカウント、namespace、SFS設定、API間隔を統一します。
 
-```ini
-AUTOMOD_BACKEND=postgres
-AUTOMOD_DATABASE_URL=postgresql://automod:replace-password@db.internal:5432/automod
-AUTOMOD_NAMESPACE=misskey-production
-AUTOMOD_ROLE=worker
-WORKER_CONCURRENCY=4
-```
-
-同じ設定で`AUTOMOD_ROLE=ingest`の受信プロセスを配置します。新規Docker構成では`docker compose -f compose.distributed.yaml up -d --build --scale worker=2`も使用できます。既存SQLiteからの移行は全Automodを停止して`bun run migrate`で実施します。詳細は[配置ガイド](docs/deployment.md)を参照してください。
-
-## ルールを更新する手順
-
-1. `rules.md` を編集する。
-2. この会話で「`rules.md` を反映してください」と依頼する。
-3. 生成結果とテスト結果を確認する。
-4. `docker compose up -d --build` または `bun run build` 後の再起動で反映する。
-
-静的モデルなので、ファイル保存だけでは稼働中プロセスの挙動は変わりません。これは意図した安全境界です。
-
-## 実行時フィルタ
-
-| 対象 | 内容 |
-|---|---|
-| `content` | 本文、CW、添付ファイル名・説明、アンケート選択肢 |
-| `text` | 本文のみ |
-| `cw` | CW のみ |
-| `username` | ローカルユーザー名 |
-| `filename` | 添付ファイル名・説明 |
-
-判定は大文字小文字を区別しない部分一致、または安全性検査済みの正規表現です。正規表現は500文字までで、バックリファレンス、後読み、代表的なネスト量指定子を拒否します。
-
-## 動作確認と監視
+単体Docker:
 
 ```sh
-bun run rules:check
+docker compose up -d --build
+```
+
+分散Dockerは`.env`へ十分長いランダムな英数字の`AUTOMOD_POSTGRES_PASSWORD`も指定してから実行します。
+
+```sh
+docker compose -f compose.distributed.yaml up -d --build --scale worker=2
+```
+
+コンテナ内の`127.0.0.1`はコンテナ自身です。Misskeyも同じネットワークなら`http://misskey:3000`等のサービス名、ホストOSなら到達可能な`host.docker.internal`や公開HTTPS URLを使います。ホストのMisskeyがループバックだけで待ち受ける場合、host-gatewayからは接続できません。
+
+単体構成の`./data:/app/data`は永続化が必要です。コンテナ内のBunユーザーに書き込み権限を与え、ヘルスチェック用ポートはホストのループバックへ限定しています。
+
+詳細は[配置・停止移行・分散設定](docs/deployment.md)、[systemd](docs/systemd.md)、[Compose単体](compose.yaml)、[Compose分散](compose.distributed.yaml)を参照してください。
+
+## 日常運用と主な設定
+
+```sh
+bun run status
+curl --fail http://127.0.0.1:8787/health
+```
+
+| 設定 | 既定値・用途 |
+|---|---|
+| `AUTOMOD_MODE` | `dry-run`。`enforce`でT1/T2の変更を許可 |
+| `T2_ROLE_ID` | T2で付与する手動ロールID |
+| `AUTOMOD_DATA_DIR` | `data`。単体DBは`automod.sqlite` |
+| `MAX_INBOX_JOBS` | 未完了・実行中・deadの合計10万件 |
+| `MAX_QUEUED_JOBS` | レビュー・削除キューそれぞれ10万件 |
+| `MAX_PENDING_NOTES` | DB保存待ちのメモリ上限1000件 |
+| `WORK_MAX_ATTEMPTS` | 最大5回でdeadへ送る |
+| `MIN_ACTION_INTERVAL_MS` | Misskey API全体で共有する最小間隔1100ms |
+| `LLM_REVIEW_DELAY_MS` | レビュージョブの遅延15分。実行workerは未接続 |
+
+全設定は[.env.example](.env.example)を参照してください。
+
+ヘルスは必要なDB・worker・Streamingが稼働中なら200、接続不足は503です。worker専用ロールはStreamingを要求しません。HTTP 200だけでは処理の追従やSFS照会の成功を保証しません。
+
+特に`queue.pending`、`queue.oldestPendingAt`、`queue.dead`、`reviewJobs` / `purgeJobs`、受信拒否・失敗数、`reputation`の当日予算と待機期限を監視します。結果不明の制裁は監査の`automation.skipped.uncertain`、SFS未確認は`reputation.assessed`の`unavailable`で確認できます。
+
+保存済みの受信ケースは再起動後に再開し、完了IDと操作ジャーナルで重複を防ぎます。キュー上限や保存失敗時は受信を停止します。停止中・保存前の投稿の再取得はありません。deadの自動再投入はせず、人間が監査・判断します。
+
+LLMレビューと削除のキューは現在自動消費されません。監査・完了IDの自動アーカイブも未実装なので、DB容量とバックアップを管理してください。ジョブ件数制限はディスク総バイト数の制限ではありません。
+
+## 更新・バックアップ・移行
+
+ソース更新後は`bun run build`を成功させてから再起動します。ルールやモードを変える場合は、前述の旧ケース処理も先に行います。
+
+SQLiteのバックアップ・ホスト移動・PostgreSQLへの移行は全Automodを停止して行い、`AUTOMOD_DATA_DIR`全体を保存します。残存するWAL/SHMも含め、namespaceを引き継いでください。
+
+PostgreSQLへは移行先の設定を用意し、未使用namespaceへコピーします。
+
+```sh
+bun run migrate
+bun run status
+```
+
+人間判断、監査、未処理ケース、完了ID、両ジョブキュー、操作ジャーナル、SFSキャッシュ、API予算・待機期限を引き継ぎます。中断した移行は同じ移行元で再実行でき、件数・ダイジェストの検証完了まで通常処理を禁止します。[手順と注意点](docs/deployment.md#既存データの移行)を参照してください。
+
+## 開発と検証
+
+```sh
 bun test
-bun test --coverage
 bun run build
 ```
 
-ヘルスチェック:
+通常のテストは外部SFS / 実Misskeyへユーザー情報を送りません。PostgreSQLテストは`AUTOMOD_TEST_DATABASE_URL`を指定した場合だけ実行します。専用の使い捨てテストDBを使ってください。coverageは`bun test --coverage`で確認できます。
 
-```sh
-curl http://127.0.0.1:8787/health
-```
+実SQLite・PostgreSQLでの重複防止、共有予算、人間優先、障害復旧、移行はテスト済みです。実SFSには架空メールのハッシュで疎通を確認しています。**実Misskeyでの稼働・権限・負荷検証、Docker / systemdでの実配置は未検証です。**
 
-必要なDB・ワーカー・Streamingが稼働中ならHTTP 200、必要な接続がない場合は503を返します。worker専用ロールはStreaming接続を要求しません。`queue`の待機・実行・dead・完了数、両ジョブ数、最古の待機時刻、API待機期限と、`noteProcessing`のDB保存待ち・拒否・失敗数を監視してください。HTTP 200だけでは処理の追従を保証しません。`bun run status`でもDBの状態を確認できます。
-
-`MIN_ACTION_INTERVAL_MS`（既定1100ms）は認証・照会・制裁の全API呼び出しで共有します。429では全ワーカーに待機を適用します。結果不明の制裁は再送せず`automation.skipped.uncertain`を記録します。実際のMisskeyでの動作・負荷検証は未実施です。
-
-## 安全な導入手順
-
-1. すべての新規ルールを T3 として生成し、`dry-run` で誤検知を確認する。
-2. 十分な証拠があるものだけ T2 に変更し、制限ロールの権限を確認する。
-3. T1 は複数の確定的指標を要求し、モデレーター保護と人間オーバーライドを試験する。
-4. バックアップ、監査ログ、キュー監視を確認してから `enforce` に切り替える。
-
-公式仕様: [Misskey Streaming API](https://misskey-hub.net/en/docs/for-developers/api/streaming/)、[localTimeline チャンネル](https://misskey-hub.net/en/docs/for-developers/api/streaming/channel/local-timeline/)、[権限一覧](https://misskey-hub.net/en/docs/for-developers/api/permission/)
+設計は[architecture](docs/architecture.md)、検証記録は[初期実装](docs/testing/misskey-automod.tdd.md)、[永続化](docs/testing/durable-processing.tdd.md)、[SFS](docs/testing/stop-forum-spam.tdd.md)を参照してください。
