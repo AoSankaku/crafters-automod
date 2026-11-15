@@ -16,7 +16,9 @@ async function harness({ listed = true, rules = [] } = {}) {
   const policy = loadReputationPolicy({ accountReputation: { schemaVersion: 1, id: "stopforumspam-account", enabled: true, tier: "T3", reason: "Account reputation observation", minFrequency: 3, minConfidence: 75, maxAgeDays: 90, emailScore: 40, ipScore: 20, excludedUserIds: [] } });
   const key = reputationPolicyKey(policy, { sourceSha256, checkIp: false });
   const authority = { hasHumanDecision: (value) => store.hasHumanDecision(value) };
-  const client = { showUser: mock(async (_id, options) => { await options.beforeRequest(); return { email: "member@example.invalid", emailVerified: true }; }),
+  const user = { email: "member@example.invalid", emailVerified: true, moderationNote: "", roles: [], roleAssigns: [], isModerator: false, isSuspended: false };
+  const client = { showUser: mock(async (_id, options) => { await options.beforeRequest(); return { ...user }; }),
+    updateUserNote: mock(async (_id, text, options) => { await options.beforeRequest(); user.moderationNote = text; }),
     getMe: mock(async () => ({ id: "automod", host: null })),
     suspendUser: mock(async (_id, options) => { await options.beforeRequest(); }),
     assignRole: mock(async (_id, _role, options) => { await options.beforeRequest(); }) };
@@ -77,7 +79,7 @@ describe("Stop Forum Spam durable integration", () => {
       expect(h.provider.lookup).toHaveBeenCalledTimes(1);
     } finally { controller.abort(); await h.intake.close(); await h.store.close(); }
   });
-  test("a reputation-only match raises T3 awareness without any Misskey mutation", async () => {
+  test("a reputation-only match logs T3 in Misskey without account restrictions", async () => {
     const h = await harness();
     try {
       expect(await h.intake.submit(note)).toBe(true);
@@ -85,6 +87,9 @@ describe("Stop Forum Spam durable integration", () => {
       expect(await h.store.stats()).toEqual(expect.objectContaining({ completed: 1, reviewJobs: 1, dead: 0 }));
       expect(h.client.suspendUser).not.toHaveBeenCalled();
       expect(h.client.assignRole).not.toHaveBeenCalled();
+      expect(h.client.updateUserNote).toHaveBeenCalledTimes(1);
+      expect(h.client.updateUserNote.mock.calls[0][1]).toContain("stopforumspam-account");
+      expect(h.client.updateUserNote.mock.calls[0][1]).not.toMatch(/member@example|Ordinary private/);
       expect(await h.events()).toContainEqual(expect.objectContaining({ type: "reputation.assessed", riskScore: 40 }));
       expect(await h.events()).toContainEqual(expect.objectContaining({ type: "case.classified", tier: "T3", ruleIds: [h.policy.id] }));
       for await (const row of h.store.exportState()) expect(JSON.stringify(row)).not.toMatch(/member@example|Ordinary private/);

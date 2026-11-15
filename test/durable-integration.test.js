@@ -14,7 +14,7 @@ async function harness(tier = "T2") {
   const store = await createStore({ sqlitePath: ":memory:", namespace: "integration" });
   const rules = [{ id: "rule", enabled: true, tier, field: "text", matchers: [{ type: "contains", value: "spam" }], excludedUsers: [], reason: "Policy" }];
   const config = loadConfig({ MISSKEY_URL: "https://misskey.example", MISSKEY_TOKEN: "secret", AUTOMOD_MODE: "enforce", T2_ROLE_ID: "restricted", MIN_ACTION_INTERVAL_MS: "1" });
-  const user = { id: "user", host: null, roleAssigns: [], isModerator: false, isAdministrator: false, isSuspended: false };
+  const user = { id: "user", host: null, moderationNote: "", roles: [], roleAssigns: [], isModerator: false, isAdministrator: false, isSuspended: false };
   const calls = [];
   const fetchImpl = mock(async (url, request) => {
     request.signal.throwIfAborted();
@@ -23,6 +23,7 @@ async function harness(tier = "T2") {
     if (endpoint === "admin/show-user") return Response.json(user);
     if (endpoint === "admin/roles/assign") user.roleAssigns.push({ roleId: "restricted" });
     if (endpoint === "admin/suspend-user") user.isSuspended = true;
+    if (endpoint === "admin/update-user-note") user.moderationNote = JSON.parse(request.body).text;
     return new Response(null, { status: 204 });
   });
   const client = new MisskeyApiClient({ baseUrl: config.baseUrl, token: config.token, fetchImpl,
@@ -70,7 +71,7 @@ describe("durable moderation integration", () => {
       await h.store.startAction(claim, "suspend");
       await h.store.fail(claim, { code: "TRANSPORT_UNCERTAIN", delayMs: 0 });
       await h.worker().processOne();
-      expect(h.calls).toEqual(["admin/show-user"]);
+      expect(h.calls).toEqual(["admin/show-user", "admin/show-user", "admin/update-user-note"]);
       expect(await h.store.stats()).toEqual(expect.objectContaining({ completed: 1, purgeJobs: 0 }));
       const events = [];
       for await (const record of h.store.exportState()) if (record.kind === "audit") events.push(record.event);

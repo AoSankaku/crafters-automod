@@ -1,5 +1,6 @@
 import { classifyNote } from "./classification.js";
 import { ModerationEnforcer } from "./enforcement.js";
+import { ModerationNoteWriter } from "./moderation-note.js";
 
 const DEFAULT_DEDUPE_LIMIT = 10_000;
 
@@ -19,6 +20,8 @@ export class TieredModerationEngine {
     assertActive,
     signal,
     userStateMaxAgeMs,
+    moderationNoteEnabled = true,
+    moderationNoteLanguage = "ja",
   }) {
     this.mode = mode;
     this.moderator = moderator;
@@ -31,6 +34,12 @@ export class TieredModerationEngine {
     this.t2RoleId = t2RoleId;
     this.reviewDelayMs = reviewDelayMs;
     this.processedNoteIds = new Map();
+    this.caseEvents = new Map();
+    this.moderationNotes = moderationNoteEnabled ? new ModerationNoteWriter({
+      moderator, authority, journal, assertActive, signal, logger,
+      language: moderationNoteLanguage, userStateMaxAgeMs,
+      record: (type, moderationCase, details) => this.record(type, moderationCase, details),
+    }) : null;
     this.enforcer = new ModerationEnforcer({
       record: (type, moderationCase, details) => this.record(type, moderationCase, details),
       moderator,
@@ -62,6 +71,7 @@ export class TieredModerationEngine {
     const { noteId, tier } = moderationCase;
     if (this.processedNoteIds.has(noteId) || await this.ledger.hasProcessed?.(noteId)) return true;
     this.remember(noteId);
+    this.caseEvents.set(moderationCase.caseId, []);
     try {
       await this.record("case.classified", moderationCase, { actor: "deterministic", mode: this.mode });
       this.logger.warn("Note classified by automod", { ...moderationCase, mode: this.mode });
@@ -86,23 +96,30 @@ export class TieredModerationEngine {
       }
 
       if (this.mode === "dry-run" || tier === "T3") {
-        await this.record("case.completed", moderationCase, { actor: "deterministic" });
-        return true;
+        return await this.finishCase(moderationCase, true);
       }
       const succeeded =
         tier === "T1"
           ? await this.enforceT1(moderationCase)
           : await this.enforceT2(moderationCase);
-      if (succeeded) {
-        await this.record("case.completed", moderationCase, { actor: "deterministic" });
-      } else {
-        this.forget(noteId);
-      }
-      return succeeded;
+      return await this.finishCase(moderationCase, succeeded);
     } catch (error) {
       this.forget(noteId);
       throw error;
+    } finally {
+      this.caseEvents.delete(moderationCase.caseId);
     }
+  }
+
+  async finishCase(moderationCase, succeeded) {
+    const logged = this.mode === "dry-run" || !this.moderationNotes ||
+      await this.moderationNotes.write(moderationCase, this.caseEvents.get(moderationCase.caseId) ?? []);
+    if (succeeded && logged) {
+      await this.record("case.completed", moderationCase, { actor: "deterministic" });
+      return true;
+    }
+    this.forget(moderationCase.noteId);
+    return false;
   }
 
   async enforceT1(moderationCase) {
@@ -113,13 +130,15 @@ export class TieredModerationEngine {
     return this.enforcer.enforceT2(moderationCase);
   }
 
-  record(type, moderationCase, details) {
-    return this.ledger.record({
+  async record(type, moderationCase, details) {
+    const event = {
       type,
       timestamp: new Date().toISOString(),
       ...moderationCase,
       ...details,
-    });
+    };
+    await this.ledger.record(event);
+    this.caseEvents.get(moderationCase.caseId)?.push(event);
   }
 
   remember(noteId) {

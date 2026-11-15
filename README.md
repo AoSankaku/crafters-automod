@@ -11,6 +11,7 @@ Misskeyのローカルタイムラインを監視する、サーバー運営者�
 | 機能 | 状態 |
 |---|---|
 | 静的ルールによる分類、T1凍結、T2ロール付与、T3記録 | 実装済み。実際の制裁は`enforce`時のみ |
+| MisskeyのモデレーションノートへのT1/T2/T3ログ | `enforce`時に既定で追記。判定理由と処理結果を表示 |
 | 永続受信キュー、重複防止、ユーザー単位排他、再試行 | SQLite / PostgreSQLに対応 |
 | 人間オーバーライド、操作ジャーナル、監査 | 実装済み |
 | 共有APIレート制御、SFSのキャッシュ・日次予算 | 実装済み |
@@ -79,12 +80,13 @@ Misskeyの「設定 → API」から専用トークンを発行し、値を`MISS
 | 画面の区分 | 英語の項目名 | 権限ID | 用途・必要な場合 |
 |---|---|---|---|
 | Permissions | **View your account information** | `read:account` | 起動時の認証確認。必須 |
-| Admin Permissions | **View private user info** | `read:admin:show-user` | T1/T2の投稿者情報確認、SFS用の確認済みメール照会 |
+| Admin Permissions | **View private user info** | `read:admin:show-user` | T1/T2の投稿者情報確認、T1/T2/T3ログ追記前の既存メモ取得、SFS用の確認済みメール照会 |
+| Admin Permissions | **Manage moderation note** | `write:admin:user-note` | T1/T2/T3ログの追記。既定の`enforce`運用で必要 |
 | Admin Permissions | **Suspend user** | `write:admin:suspend-user` | T1の凍結を`enforce`で使う場合 |
 | Admin Permissions | **Manage roles** | `write:admin:roles` | T2のロール付与を`enforce`で使う場合 |
 | Admin Permissions | **View user IP addresses** | `read:admin:user-ips` | `SFS_CHECK_IP=true`の場合のみ。発行元アカウントの管理者権限も必要 |
 
-通常のT1/T2運用では上の4項目、SFSのIP照会を使う場合は5項目です。「Delete user account」「Delete all files of a user」などの削除権限は、現在の実装には不要です。対応関係は[Misskey公式の英語権限一覧](https://misskey-hub.net/en/docs/for-developers/api/permission/)でも確認できます。
+通常のT1/T2運用では上の5項目、SFSのIP照会を使う場合は6項目です。T3のみの運用でも、既定のログ追記には`read:account`・`read:admin:show-user`・`write:admin:user-note`が必要です。「Delete user account」「Delete all files of a user」などの削除権限は、現在の実装には不要です。対応関係は[Misskey公式の英語権限一覧](https://misskey-hub.net/en/docs/for-developers/api/permission/)でも確認できます。
 
 T2の制限内容はMisskey側の手動ロールで設定し、IDを`T2_ROLE_ID`へ指定します。T2を有効なルールとして`enforce`する場合、このIDは必須です。発行したトークンはGitHubやチャットへ貼らず、サーバーの`.env`へ保存してください。
 
@@ -111,6 +113,20 @@ bun run status
 `enforce`へ切り替える際は、受信を止め、旧モードのworkerで未完了ケースを処理してから、全プロセスの`AUTOMOD_MODE=enforce`をそろえて再起動します。**dry-runで受理済みの同じノートIDを、切り替え後に再制裁することはありません。** 新しいモードは新規に受理する投稿に適用します。
 
 常駐化する場合は[systemd手順](docs/systemd.md)を使えます。Misskeyとは別サービス・専用ユーザーで実行します。
+
+## Misskeyから判定ログを確認する
+
+`AUTOMOD_MODE=enforce`では、T1/T2/T3の判定を対象ユーザーの**モデレーションノート（Moderation note）**へ既定で追記します。Misskeyの管理画面で対象ユーザーを開くと、区分、UTC日時、ケース・投稿ID、ルールID、理由、処理結果を確認できます。既存のメモを読み取り、その末尾へログを追加します。本文・メールアドレス・IPアドレスはログへ転記しません。
+
+- **T1**：凍結の成否と過去投稿削除ジョブの保存状態。削除完了とは表示しません。
+- **T2**：制限ロールの付与結果と遅延レビューの予約状態。
+- **T3**：制限なしの観察と遅延レビューの予約状態。SFSのみの一致も対象です。
+
+レビュー・削除ワーカーは現在未接続なので、予約済みの処理にはその旨を表示します。失敗・既存の管理状態による見送り・結果不明の操作も、成功と区別します。記録言語は`MODERATION_NOTE_LANGUAGE=ja`（既定）または`en`、追記を止める場合は`MODERATION_NOTE_ENABLED=false`です。既存の`.env`に設定を追加しなくても有効になります。**dry-runではモデレーションノートにも書き込みません。** 過去に完了したケースの一括転記は行いません。
+
+同じケース・処理結果は記録IDと永続ジャーナルで重複を防ぎ、結果が失敗から成功へ変わった場合は別の経過ログを追記します。人間のオーバーライド登録済みケース、管理者・モデレーターは書き込み対象から除きます。既存メモを含め6万文字を超える場合は既存文を削らず、監査へ要確認として記録します。
+
+Misskeyの[公式API](https://github.com/misskey-dev/misskey/blob/develop/packages/backend/src/server/api/endpoints/admin/update-user-note.ts)は全文更新方式で、管理画面の同時編集との原子的な追記はできません。書き込み直前に人間判断・有効なリース・取得データの鮮度を再確認しますが、同時編集の競合を完全には防げません。人間がメモや処置を編集するときは、先に[オーバーライド](#人間による優先判断)を登録してください。送信結果不明で記録IDを確認できない場合は再送せず、ローカル監査に要確認を残します。権限不足など確定した失敗は上限付きで再試行し、未完了ならdeadに残ります。詳細な履歴の正本はAutomodの監査DBです。
 
 ## ルールの設定方法
 
@@ -207,7 +223,7 @@ SQLite単体構成では`data/human-overrides.json`も各操作の直前に再�
 | SQLite単体 | Misskeyと同居、または専用ホストで1プロセス | `AUTOMOD_BACKEND=sqlite`、`AUTOMOD_ROLE=all`、並列数1 |
 | PostgreSQL分散 | 受信と複数workerを分離 | `AUTOMOD_BACKEND=postgres`、共通DB・namespace、`ingest` / `worker` |
 
-SQLiteはローカルディスクに置き、複数ホストやNFSで共有しません。PostgreSQLはMisskeyのDBから分けたAutomod専用DBを使います。全プロセスでルール、モード、トークンのアカウント、namespace、SFS設定、API間隔を統一します。
+SQLiteはローカルディスクに置き、複数ホストやNFSで共有しません。PostgreSQLはMisskeyのDBから分けたAutomod専用DBを使います。全プロセスでルール、モード、トークンのアカウント、namespace、SFS設定、モデレーションノート設定、API間隔を統一します。
 
 単体Docker:
 
@@ -237,6 +253,8 @@ curl --fail http://127.0.0.1:8787/health
 | 設定 | 既定値・用途 |
 |---|---|
 | `AUTOMOD_MODE` | `dry-run`。`enforce`でT1/T2の変更を許可 |
+| `MODERATION_NOTE_ENABLED` | `true`。`enforce`時にT1/T2/T3をMisskeyの管理メモへ追記 |
+| `MODERATION_NOTE_LANGUAGE` | `ja`。`en`も指定可能 |
 | `T2_ROLE_ID` | T2で付与する手動ロールID |
 | `AUTOMOD_DATA_DIR` | `data`。単体DBは`automod.sqlite` |
 | `MAX_INBOX_JOBS` | 未完了・実行中・deadの合計10万件 |

@@ -48,6 +48,8 @@ function createHarness({ mode = "enforce", humanDecision = false, userState = {}
     selfUserId: "automod-user",
     t2RoleId: "restricted-role",
     reviewDelayMs: 60_000,
+    // These tests isolate classification/enforcement; note delivery has dedicated integration coverage.
+    moderationNoteEnabled: false,
   });
 
   return { authority, engine, ledger, moderator, purgeQueue, reviewQueue };

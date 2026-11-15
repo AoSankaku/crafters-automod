@@ -43,11 +43,15 @@ export function loadConfig(env = process.env, workingDirectory = process.cwd()) 
   const sfsEnabled = boolean(env.SFS_ENABLED ?? "false", "SFS_ENABLED");
   const sfsCheckIp = boolean(env.SFS_CHECK_IP ?? "false", "SFS_CHECK_IP");
   if (sfsCheckIp && !sfsEnabled) throw new Error("SFS_CHECK_IP requires SFS_ENABLED=true.");
+  const moderationNoteLanguage = env.MODERATION_NOTE_LANGUAGE ?? "ja";
+  if (!["ja", "en"].includes(moderationNoteLanguage)) throw new Error("MODERATION_NOTE_LANGUAGE must be ja or en.");
 
   return {
     baseUrl: normalizedUrl,
     token,
     mode,
+    moderationNoteEnabled: boolean(env.MODERATION_NOTE_ENABLED ?? "true", "MODERATION_NOTE_ENABLED"),
+    moderationNoteLanguage,
     storageBackend,
     databaseUrl,
     namespace,

@@ -49,6 +49,11 @@ export class ModerationEnforcer {
           await this.recordHumanStateSkip(moderationCase, "completed_suspension_not_observed");
           return true;
         }
+        await this.record("t1.suspended", moderationCase, {
+          actor: "deterministic",
+          reason: "completed_suspension_observed",
+          outcome: "account_suspended",
+        });
         return await this.enqueuePurge(moderationCase);
       }
 
@@ -123,6 +128,12 @@ export class ModerationEnforcer {
       if (action?.status === "completed") {
         if (!alreadyAssigned) {
           await this.recordHumanStateSkip(moderationCase, "completed_role_assignment_not_observed");
+        } else {
+          await this.record("t2.role.assigned", moderationCase, {
+            actor: "deterministic",
+            reason: "completed_role_assignment_observed",
+            outcome: "restrictive_role_assigned",
+          });
         }
         return true;
       }

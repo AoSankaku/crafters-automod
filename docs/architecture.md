@@ -27,6 +27,7 @@ Small installations use built-in `bun:sqlite`, WAL/FULL synchronization, a local
 | `durable-worker.js` | Bounded concurrency, lease renewal/cancellation, retries and dead letters |
 | `storage/index.js` | Atomic inbox claims, user leases, audit, completion, jobs, human decisions, journal and API budget |
 | `moderation.js`, `enforcement.js` | Case transitions, authority gates and guarded Misskey mutations |
+| `moderation-note.js` | Bounded, deduplicated T1/T2/T3 summaries appended to Misskey moderation notes |
 | `shared-authority.js`, `human-authority.js` | Shared decisions and SQLite's local fail-closed override file |
 | `rate-limiter.js`, `misskey.js` | Shared API admission, cooldown, timeouts and sanitized errors |
 | `legacy-import.js`, `maintenance.js`, `cli.js` | Validated streaming legacy import, overrides, offline state migration and status |
@@ -44,6 +45,12 @@ PostgreSQL uses transactional row locks, `SKIP LOCKED`, a unique user-lease row 
 A per-case action journal records `started` before sending a mutation and `completed` after a definite successful response. A restarted worker never blindly repeats an uncertain `started` mutation: it records `automation.skipped.uncertain` and leaves suspension/purge to a human. A completed journal is reconciled with current Misskey state before continuing. A reversed state is treated as human-managed. A preexisting suspension without this case's completed journal never authorizes historical deletion. Definite 429 rejection may reset the start marker and retry through the shared cooldown.
 
 HTTP cannot be atomically committed with this database. Cancellation/fencing prevents new operations after a detected lease loss, but cannot retract a request already accepted by Misskey. Fully atomic precedence against concurrent Misskey control-panel actions requires a Misskey-side conditional administrative boundary. Do not claim exactly-once remote mutations.
+
+Moderation-note logging defaults to enabled in `enforce` mode, including advisory T3. Dry-run never writes to Misskey. After enforcement, the engine passes the current attempt's audited event types to a separate writer; completion waits for note delivery or an explicitly audited safe skip. Confirmed T2 actions emit their observed result on retry so a rejected log does not lose the successful role outcome. Log failure cannot roll back or repeat a journaled restriction.
+
+The writer reads `admin/show-user`, preserves its `moderationNote` prefix verbatim, and uses `admin/update-user-note` through the same shared API budget. It checks human authority, lease, protected roles and snapshot freshness, records a started action before sending, and embeds a stable case/outcome marker. A completed action never restores text removed by a human. An uncertain action is reconciled only when the remote marker is present; an absent marker requires human review without resending. A changed outcome may append a separate entry. Entries are at most 4096 JavaScript characters; the complete note is at most 60000, with capacity skips visible in the audit. Human text is never truncated or archived automatically.
+
+Logs support Japanese and English, contain policy reasons/identifiers and actual action outcomes, and distinguish queued jobs from executed work. They exclude post content and account identifiers such as email/IP. Existing moderation-note text and upstream error bodies never enter Automod's audit. The upstream API replaces the complete text without compare-and-swap; a simultaneous human edit can still race. Register a shared override before editing, or stop Automod for exclusive maintenance. Stronger atomic append requires a Misskey-side API change.
 
 ## API budget and authority
 

@@ -48,6 +48,8 @@ export function createCaseHandler({ store, config, rules, sourceSha256, client, 
       mode: config.mode, moderator: client, ledger, reviewQueue: queue("review"), purgeQueue: queue("purge"),
       authority, logger, selfUserId, t2RoleId: config.t2RoleId, reviewDelayMs: config.reviewDelayMs,
       journal, assertActive, signal,
+      moderationNoteEnabled: config.moderationNoteEnabled,
+      moderationNoteLanguage: config.moderationNoteLanguage,
       userStateMaxAgeMs: Math.max(5000, config.minimumActionIntervalMs + 2000),
     });
     const { caseId, noteId, userId, tier, ruleIds, reasons } = envelope;
