@@ -65,7 +65,13 @@ Legacy JSONL import validates and streams records with per-line idempotency and 
 
 Migration records retain absolute persisted deadlines so a new export of an unchanged source has the same digest after interruption. Synchronize source/destination clocks. Stable record digests and a count/digest footer reject altered, missing or mixed records; imported legacy markers prevent source replay from duplicating audit or human decisions.
 
-## Unwired boundaries
+## Optional account reputation
+
+`reputation-policy.js` validates a compiled T3-only `accountReputation` policy. With explicit `SFS_ENABLED`, unmatched local posts produce schema-v2 body-free candidates; existing static schema-v1 cases remain compatible. `account-reputation.js` uses verified email and optionally a recent public IP from the dedicated administrative API. `stop-forum-spam.js` sends only an MD5 email identifier and optional IP over HTTPS, with bounded response handling, cancellation, shared daily quota and 429/503 cooldown. No plaintext email, IP, email hash or note body enters persistent state.
+
+Static T1 skips external enrichment; static T2/T3 complete their deterministic work first. A qualifying reputation-only result may produce T3, never T1/T2. Failed lookups remain unavailable. Human authority and snapshot freshness are rechecked before external disclosure. A bounded shared user/policy cache suppresses duplicate lookups and reviews; incoming ordinary posts with a valid cached verdict need no new inbox row. The cache and separate provider budget migrate with the ordinary state. [Operator details and limitations](stop-forum-spam.md).
+
+## Unwired workers
 
 LLM review remains queued only; no provider/model or server terms document has been selected. Its output envelope accepts only `clear`, `T2`, `T3`, `human-review` and rejects T1. The runtime remains useful without an LLM.
 
