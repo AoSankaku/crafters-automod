@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -77,6 +78,9 @@ describe("durable moderation store (SQLite)", () => {
     expect(await store.reputationStats()).toEqual(expect.objectContaining({
       apiRequests: 2, requestsToday: 2, blockedUntil: 1_400,
     }));
+    f.setNow(86_400_000);
+    expect(await store.tryReputationSlot(100, 2)).toBe(0);
+    expect(await store.reputationStats()).toMatchObject({ requestsToday: 1, apiRequests: 3 });
   });
 
   test("caches only sanitized reputation results by policy and user, with bounded eviction", async () => {
@@ -97,6 +101,8 @@ describe("durable moderation store (SQLite)", () => {
     expect(await store.getReputation("user-one", policyKey)).toBeNull();
     expect(await store.getReputation("user-two", policyKey)).toEqual(expect.objectContaining({ caseId: "two" }));
     expect(await store.reputationStats()).toEqual(expect.objectContaining({ cacheEntries: 1 }));
+    f.setNow(1_300);
+    expect(await store.getReputation("user-two", policyKey)).toBeNull();
   });
 
   test("rejects raw identifiers and stale lease writes in reputation storage", async () => {
@@ -356,7 +362,13 @@ describe("durable moderation store (SQLite)", () => {
     await source.enqueueJob("purge", caseJob("purge-1", "u-purge"));
     await source.setHumanDecision({ scope: "user", id: "human-1", reason: "moderator decision" });
     await source.markImport("legacy-file-fingerprint");
+    await source.saveReputation(runningClaim, "c".repeat(64), {
+      status: "listed", score: 70,
+      signals: [{ kind: "email", frequency: 7, confidence: 75, lastSeen: 999 }],
+    }, 30_000);
     await source.tryApiSlot(100);
+    await source.tryReputationSlot(100, 20);
+    await source.blockReputationApi(700);
     await source.blockApi(1_000);
 
     const exported = [];
@@ -379,6 +391,12 @@ describe("durable moderation store (SQLite)", () => {
     expect(await target.hasHumanDecision({ userId: "human-1" })).toBe(true);
     expect(await target.hasImport("legacy-file-fingerprint")).toBe(true);
     expect(await target.getAction("pending", "suspend")).toEqual({ status: "started" });
+    expect(await target.getReputation("u-pending", "c".repeat(64))).toEqual(expect.objectContaining({
+      caseId: "pending", result: expect.objectContaining({ status: "listed", score: 70 }),
+    }));
+    expect(await target.reputationStats()).toEqual(expect.objectContaining({
+      cacheEntries: 1, apiRequests: 1, requestsToday: 1, blockedUntil: 1_700,
+    }));
 
     const restoredClaim = await target.claim({ workerId: "target-worker", leaseMs: 100 });
     expect(restoredClaim.noteId).toBe("pending");
@@ -468,6 +486,27 @@ describe("durable moderation store (SQLite)", () => {
     await expect(createStore({ sqlitePath: nonexistentPath, namespace: "missing", requireExisting: true }))
       .rejects.toBeInstanceOf(StorageError);
     expect(existsSync(nonexistentPath)).toBe(false);
+  });
+
+  test("requireExisting adds reputation tables to an older valid database before exporting", async () => {
+    const { open, directory } = await fixture();
+    const existing = await open({ namespace: "legacy" });
+    await existing.enqueue(envelope("legacy-note"));
+    await existing.close();
+    stores.splice(stores.indexOf(existing), 1);
+
+    const database = new Database(join(directory, "state.sqlite"));
+    database.exec("DROP TABLE automod_reputation_cache; DROP TABLE automod_reputation_budget;");
+    database.close();
+
+    const reopened = await open({ namespace: "legacy", requireExisting: true });
+    expect(await reopened.reputationStats()).toEqual({
+      cacheEntries: 0, apiRequests: 0, requestsToday: 0, blockedUntil: 0,
+    });
+    const records = [];
+    for await (const record of reopened.exportState()) records.push(record);
+    expect(records.map((record) => record.kind)).toContain("reputation-budget");
+    expect(records.at(-1).kind).toBe("footer");
   });
 
   test("rejects migration namespace/schema mismatches and non-empty destinations", async () => {

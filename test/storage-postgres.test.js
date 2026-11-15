@@ -104,6 +104,10 @@ if (!databaseUrl) {
         await source.startAction(done, "confirmed-action");
         await source.completeAction(done, "confirmed-action");
         await source.setHumanDecision({ scope: "note", id: "z-done", reason: "moderator reviewed" });
+        await source.saveReputation(done, "d".repeat(64), {
+          status: "listed", score: 80,
+          signals: [{ kind: "email", frequency: 9, confidence: 80, lastSeen: Math.floor(Date.now() / 1000) }],
+        }, 60_000);
         await source.record({ type: "case.completed", caseId: "z-done", noteId: "z-done", userId: "u-done", actor: "human" }, { lease: done });
         await source.complete(done);
         await source.markImport("legacy-file-fingerprint");
@@ -113,6 +117,8 @@ if (!databaseUrl) {
         await source.enqueueJob("review", { caseId: "review-case", userId: "review-user", reason: "queued" });
         await source.tryApiSlot(100);
         await source.blockApi(5_000);
+        await source.tryReputationSlot(100, 50);
+        await source.blockReputationApi(7_000);
 
         const records = [];
         for await (const record of source.exportState()) records.push(record);
@@ -144,6 +150,12 @@ if (!databaseUrl) {
         }, "legacy-audit-key")).toEqual({ imported: false });
         expect(await target.getAction("a-pending", "uncertain-action")).toEqual({ status: "started" });
         expect(await target.getAction("z-done", "confirmed-action")).toEqual({ status: "completed" });
+        expect(await target.getReputation("u-done", "d".repeat(64))).toEqual(expect.objectContaining({
+          caseId: "z-done", result: expect.objectContaining({ status: "listed", score: 80 }),
+        }));
+        expect(await target.reputationStats()).toEqual(expect.objectContaining({
+          cacheEntries: 1, apiRequests: 1, requestsToday: 1,
+        }));
         expect((await target.stats()).apiBlockedUntil).toBeGreaterThan(Date.now());
         const restored = await target.claim({ workerId: "target", leaseMs: 10_000 });
         expect(restored.noteId).toBe("a-pending");

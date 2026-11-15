@@ -25,6 +25,31 @@ export class LeaseLostError extends StorageError {
   }
 }
 
+const REPUTATION_SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS automod_reputation_cache (
+    namespace TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    policy_key TEXT NOT NULL,
+    case_id TEXT NOT NULL,
+    result JSONB NOT NULL,
+    checked_at BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    PRIMARY KEY (namespace, user_id, policy_key)
+  )`,
+  `CREATE INDEX IF NOT EXISTS automod_reputation_expiry_idx
+    ON automod_reputation_cache (namespace, expires_at, checked_at)`,
+  `CREATE INDEX IF NOT EXISTS automod_reputation_oldest_idx
+    ON automod_reputation_cache (namespace, checked_at, user_id, policy_key)`,
+  `CREATE TABLE IF NOT EXISTS automod_reputation_budget (
+    namespace TEXT PRIMARY KEY,
+    next_at BIGINT NOT NULL,
+    blocked_until BIGINT NOT NULL,
+    day_key BIGINT NOT NULL,
+    requests_today BIGINT NOT NULL DEFAULT 0,
+    api_requests BIGINT NOT NULL DEFAULT 0
+  )`,
+];
+
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS automod_inbox (
     namespace TEXT NOT NULL,
@@ -101,6 +126,7 @@ const SCHEMA = [
     blocked_until BIGINT NOT NULL,
     api_requests BIGINT NOT NULL DEFAULT 0
   )`,
+  ...REPUTATION_SCHEMA,
   `CREATE TABLE IF NOT EXISTS automod_store_metadata (
     namespace TEXT PRIMARY KEY,
     schema_version INTEGER NOT NULL,
@@ -247,6 +273,46 @@ function validateJob(kind, job) {
   json(job);
 }
 
+function validatePolicyKey(value) {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/u.test(value)) {
+    throw new StorageError("A valid reputation policy key is required.");
+  }
+}
+
+function validateReputationResult(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new StorageError("Reputation result is invalid.");
+  }
+  const keys = Object.keys(value).sort();
+  const allowed = ["code", "score", "signals", "status"];
+  if (keys.some((key) => !allowed.includes(key)) ||
+      !["status", "score", "signals"].every((key) => Object.hasOwn(value, key)) ||
+      !new Set(["listed", "clear", "unavailable", "skipped"]).has(value.status) ||
+      !Number.isInteger(value.score) || value.score < 0 || value.score > 100 ||
+      !Array.isArray(value.signals) || value.signals.length > 2) {
+    throw new StorageError("Reputation result is invalid.");
+  }
+  if (value.code !== undefined &&
+      (!/^[A-Z][A-Z0-9_]{0,63}$/u.test(value.code) || !["unavailable", "skipped"].includes(value.status))) {
+    throw new StorageError("Reputation result code is invalid.");
+  }
+  for (const signal of value.signals) {
+    if (!signal || typeof signal !== "object" || Array.isArray(signal) ||
+        Object.keys(signal).sort().join(",") !== "confidence,frequency,kind,lastSeen" ||
+        !new Set(["email", "ip"]).has(signal.kind) ||
+        !Number.isSafeInteger(signal.frequency) || signal.frequency < 0 ||
+        typeof signal.confidence !== "number" || !Number.isFinite(signal.confidence) ||
+        signal.confidence < 0 || signal.confidence > 100 ||
+        !Number.isSafeInteger(signal.lastSeen) || signal.lastSeen < 0) {
+      throw new StorageError("Reputation signal is invalid.");
+    }
+  }
+  const serialized = json(value);
+  if (new TextEncoder().encode(serialized).byteLength > 8 * 1024) {
+    throw new StorageError("Reputation result exceeds its supported size.");
+  }
+}
+
 function stateTime(value, label) {
   if (!Number.isSafeInteger(value) || value < 0) throw new StorageError(`Migration ${label} is invalid.`);
   return value;
@@ -358,6 +424,17 @@ class DurableStore {
         if (!metadata) throw new StorageError("Existing durable storage namespace was not found.");
         if (Number(metadata.schema_version) !== 1) throw new StorageError("Durable storage schema version is unsupported.");
         this.sourceId = metadata.source_id;
+        if (this.backend === "postgres") {
+          await tx.run("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", ["automod-schema-v1"]);
+        }
+        for (const statement of REPUTATION_SCHEMA) await tx.run(statement);
+        const now = await this.dbNow(tx);
+        await tx.run(
+          `INSERT INTO automod_reputation_budget
+             (namespace, next_at, blocked_until, day_key, requests_today, api_requests)
+           VALUES (?, 0, 0, ?, 0, 0) ON CONFLICT (namespace) DO NOTHING`,
+          [this.namespace, Math.floor(now / 86_400_000)],
+        );
       };
       if (this.backend === "postgres") {
         await this.sql.begin(async (sqlTx) => {
@@ -367,7 +444,7 @@ class DurableStore {
           await checkExisting(tx);
         });
       } else {
-        await checkExisting(this.adapter);
+        await this.transaction(checkExisting, { allowMigration: true });
       }
       return;
     }
@@ -382,6 +459,13 @@ class DurableStore {
         `INSERT INTO automod_api_budget (namespace, next_at, blocked_until, api_requests)
          VALUES (?, 0, 0, 0) ON CONFLICT (namespace) DO NOTHING`,
         [this.namespace],
+      );
+      const now = await this.dbNow(tx);
+      await tx.run(
+        `INSERT INTO automod_reputation_budget
+           (namespace, next_at, blocked_until, day_key, requests_today, api_requests)
+         VALUES (?, 0, 0, ?, 0, 0) ON CONFLICT (namespace) DO NOTHING`,
+        [this.namespace, Math.floor(now / 86_400_000)],
       );
       await tx.run(
         `INSERT INTO automod_store_metadata (namespace, schema_version, source_id)
@@ -846,6 +930,28 @@ class DurableStore {
     });
   }
 
+  async reputationStats() {
+    return this.read(async (tx) => {
+      const now = await this.dbNow(tx);
+      const budget = first(await tx.all(
+        `SELECT day_key, requests_today, api_requests, blocked_until
+         FROM automod_reputation_budget WHERE namespace = ?`,
+        [this.namespace],
+      ));
+      const cache = first(await tx.all(
+        `SELECT count(*) AS count FROM automod_reputation_cache WHERE namespace = ?`,
+        [this.namespace],
+      ));
+      return {
+        cacheEntries: Number(cache?.count ?? 0),
+        apiRequests: Number(budget?.api_requests ?? 0),
+        requestsToday: Number(budget?.day_key) === Math.floor(now / 86_400_000)
+          ? Number(budget?.requests_today ?? 0) : 0,
+        blockedUntil: Number(budget?.blocked_until ?? 0),
+      };
+    });
+  }
+
   async record(event, { lease } = {}) {
     try {
       return await this.transaction(async (tx) => {
@@ -1175,6 +1281,161 @@ class DurableStore {
     }
   }
 
+  async getReputation(userId, policyKey) {
+    try {
+      requiredString(userId, "reputation user ID");
+      validatePolicyKey(policyKey);
+      return await this.read(async (tx) => {
+        const now = await this.dbNow(tx);
+        const row = first(await tx.all(
+          `SELECT case_id, result, checked_at, expires_at FROM automod_reputation_cache
+           WHERE namespace = ? AND user_id = ? AND policy_key = ?`,
+          [this.namespace, userId, policyKey],
+        ));
+        if (!row || Number(row.expires_at) <= now) return null;
+        const result = decodeJson(row.result);
+        validateReputationResult(result);
+        return {
+          caseId: row.case_id,
+          result,
+          checkedAt: Number(row.checked_at),
+          expiresAt: Number(row.expires_at),
+        };
+      });
+    } catch (error) {
+      throw safeError(error);
+    }
+  }
+
+  async saveReputation(claim, policyKey, result, ttlMs, { maxEntries = 10_000 } = {}) {
+    try {
+      validatePolicyKey(policyKey);
+      validateReputationResult(result);
+      positiveNumber(ttlMs, "reputation cache TTL");
+      positiveNumber(maxEntries, "reputation cache capacity");
+      if (maxEntries > 100_000) throw new StorageError("Reputation cache capacity exceeds its supported bound.");
+      const resultJson = json(result);
+      if (new TextEncoder().encode(resultJson).byteLength > 8 * 1024) {
+        throw new StorageError("Reputation result exceeds its supported size.");
+      }
+      requiredString(claim?.userId, "reputation user ID");
+      const caseId = requiredString(claim?.noteId ?? claim?.id, "reputation case ID");
+      return await this.transaction(async (tx) => {
+        await this.advisoryLock(tx, `automod-reputation-cache:${this.namespace}`);
+        const now = await this.dbNow(tx);
+        await this.requireLease(tx, claim, now);
+
+        // Remove a bounded number of expired rows on every write, keeping cleanup work finite.
+        for (let index = 0; index < 128; index += 1) {
+          const expired = first(await tx.all(
+            `SELECT user_id, policy_key FROM automod_reputation_cache
+             WHERE namespace = ? AND expires_at <= ? ORDER BY expires_at LIMIT 1`,
+            [this.namespace, now],
+          ));
+          if (!expired) break;
+          await tx.run(
+            `DELETE FROM automod_reputation_cache
+             WHERE namespace = ? AND user_id = ? AND policy_key = ? AND expires_at <= ?`,
+            [this.namespace, expired.user_id, expired.policy_key, now],
+          );
+        }
+
+        const existing = first(await tx.all(
+          `SELECT user_id FROM automod_reputation_cache
+           WHERE namespace = ? AND user_id = ? AND policy_key = ?`,
+          [this.namespace, claim.userId, policyKey],
+        ));
+        const count = first(await tx.all(
+          `SELECT count(*) AS count FROM automod_reputation_cache WHERE namespace = ?`,
+          [this.namespace],
+        ));
+        const excess = Number(count.count) - maxEntries + (existing ? 0 : 1);
+        if (excess > 0) {
+          await tx.run(
+            `DELETE FROM automod_reputation_cache
+             WHERE namespace = ? AND (user_id, policy_key) IN (
+               SELECT user_id, policy_key FROM automod_reputation_cache
+               WHERE namespace = ? AND NOT (user_id = ? AND policy_key = ?)
+               ORDER BY checked_at, user_id, policy_key LIMIT ?
+             )`,
+            [this.namespace, this.namespace, claim.userId, policyKey, excess],
+          );
+        }
+        const expiresAt = now + ttlMs;
+        if (!Number.isSafeInteger(expiresAt)) throw new StorageError("Reputation cache expiry is out of range.");
+        await tx.run(
+          `INSERT INTO automod_reputation_cache
+             (namespace, user_id, policy_key, case_id, result, checked_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (namespace, user_id, policy_key) DO UPDATE SET
+             case_id = excluded.case_id, result = excluded.result,
+             checked_at = excluded.checked_at, expires_at = excluded.expires_at`,
+          [this.namespace, claim.userId, policyKey, caseId, resultJson, now, expiresAt],
+        );
+        return { caseId, result, checkedAt: now, expiresAt };
+      });
+    } catch (error) {
+      throw safeError(error);
+    }
+  }
+
+  async tryReputationSlot(intervalMs, maxDailyRequests) {
+    try {
+      positiveNumber(intervalMs, "reputation API interval");
+      positiveNumber(maxDailyRequests, "daily reputation API request limit");
+      if (maxDailyRequests > 1_000_000) throw new StorageError("Daily reputation API request limit exceeds its supported bound.");
+      return await this.transaction(async (tx) => {
+        const lock = this.backend === "postgres" ? " FOR UPDATE" : "";
+        const budget = first(await tx.all(
+          `SELECT next_at, blocked_until, day_key, requests_today
+           FROM automod_reputation_budget WHERE namespace = ?${lock}`,
+          [this.namespace],
+        ));
+        if (!budget) throw new StorageError();
+        const now = await this.dbNow(tx);
+        const dayKey = Math.floor(now / 86_400_000);
+        const requestsToday = Number(budget.day_key) === dayKey ? Number(budget.requests_today) : 0;
+        const dailyWait = requestsToday >= maxDailyRequests
+          ? (dayKey + 1) * 86_400_000 - now : 0;
+        const readyAt = Math.max(Number(budget.next_at), Number(budget.blocked_until));
+        const waitMs = Math.max(dailyWait, readyAt - now, 0);
+        if (waitMs > 0) return waitMs;
+        await tx.run(
+          `UPDATE automod_reputation_budget
+           SET next_at = ?, day_key = ?, requests_today = ?, api_requests = api_requests + 1
+           WHERE namespace = ?`,
+          [now + intervalMs, dayKey, requestsToday + 1, this.namespace],
+        );
+        return 0;
+      });
+    } catch (error) {
+      throw safeError(error);
+    }
+  }
+
+  async blockReputationApi(delayMs) {
+    try {
+      nonnegativeNumber(delayMs, "reputation API cooldown");
+      return await this.transaction(async (tx) => {
+        const lock = this.backend === "postgres" ? " FOR UPDATE" : "";
+        const budget = first(await tx.all(
+          `SELECT blocked_until FROM automod_reputation_budget WHERE namespace = ?${lock}`,
+          [this.namespace],
+        ));
+        if (!budget) throw new StorageError();
+        const now = await this.dbNow(tx);
+        const blockedUntil = Math.max(Number(budget.blocked_until), now + delayMs);
+        await tx.run(
+          `UPDATE automod_reputation_budget SET blocked_until = ? WHERE namespace = ?`,
+          [blockedUntil, this.namespace],
+        );
+        return blockedUntil;
+      });
+    } catch (error) {
+      throw safeError(error);
+    }
+  }
+
   async tryApiSlot(intervalMs) {
     try {
       nonnegativeNumber(intervalMs, "intervalMs");
@@ -1344,6 +1605,20 @@ class DurableStore {
           ledgerRecordDigest: row.record_digest ?? null,
         }),
       },
+      {
+        kind: "reputation-cache",
+        table: "automod_reputation_cache",
+        columns: "user_id, policy_key, case_id, result, checked_at, expires_at",
+        order: "user_id, policy_key",
+        map: (row) => this.migrationRecord("reputation-cache", `reputation-cache:${JSON.stringify([row.user_id, row.policy_key])}`, {
+          userId: row.user_id,
+          policyKey: row.policy_key,
+          caseId: row.case_id,
+          result: decodeJson(row.result),
+          checkedAt: Number(row.checked_at),
+          expiresAt: Number(row.expires_at),
+        }),
+      },
     ];
 
     for (const table of tables) {
@@ -1368,6 +1643,18 @@ class DurableStore {
       nextAt: Number(budget?.next_at ?? now),
       blockedUntil: Number(budget?.blocked_until ?? now),
       apiRequests: Number(budget?.api_requests ?? 0),
+    }));
+    const reputationBudget = first(await this.read((tx) => tx.all(
+      `SELECT next_at, blocked_until, day_key, requests_today, api_requests
+       FROM automod_reputation_budget WHERE namespace = ?`,
+      [this.namespace],
+    )));
+    yield includeInFooter(this.migrationRecord("reputation-budget", "budget:reputation", {
+      nextAt: Number(reputationBudget?.next_at ?? now),
+      blockedUntil: Number(reputationBudget?.blocked_until ?? now),
+      dayKey: Number(reputationBudget?.day_key ?? Math.floor(now / 86_400_000)),
+      requestsToday: Number(reputationBudget?.requests_today ?? 0),
+      apiRequests: Number(reputationBudget?.api_requests ?? 0),
     }));
     yield this.migrationRecord("footer", "footer", { recordCount, digest });
   }
@@ -1448,6 +1735,7 @@ class DurableStore {
         "automod_human_decisions",
         "automod_action_journal",
         "automod_state_imports",
+        "automod_reputation_cache",
       ];
       for (const table of occupied) {
         const count = first(await tx.all(`SELECT count(*) AS count FROM ${table} WHERE namespace = ?`, [this.namespace]));
@@ -1459,6 +1747,16 @@ class DurableStore {
       ));
       if (budget && (Number(budget.next_at) > 0 || Number(budget.blocked_until) > 0 || Number(budget.api_requests) > 0)) {
         throw new StorageError("State migration requires an unused destination namespace.");
+      }
+      const reputationBudget = first(await tx.all(
+        `SELECT next_at, blocked_until, requests_today, api_requests
+         FROM automod_reputation_budget WHERE namespace = ?`,
+        [this.namespace],
+      ));
+      if (reputationBudget && (Number(reputationBudget.next_at) > 0 ||
+          Number(reputationBudget.blocked_until) > 0 || Number(reputationBudget.requests_today) > 0 ||
+          Number(reputationBudget.api_requests) > 0)) {
+        throw new StorageError("State migration requires an unused reputation API budget.");
       }
       const now = await this.dbNow(tx);
       await tx.run(
@@ -1621,6 +1919,38 @@ class DurableStore {
           `UPDATE automod_api_budget SET next_at = ?, blocked_until = ?, api_requests = ?
            WHERE namespace = ?`,
           [nextAt, blockedUntil, apiRequests, this.namespace],
+        );
+        return;
+      }
+      case "reputation-cache": {
+        const userId = requiredString(record.userId, "migration reputation user ID");
+        validatePolicyKey(record.policyKey);
+        const caseId = requiredString(record.caseId, "migration reputation case ID");
+        validateReputationResult(record.result);
+        const checkedAt = stateTime(record.checkedAt, "reputation check time");
+        const expiresAt = stateTime(record.expiresAt, "reputation expiry time");
+        if (expiresAt <= checkedAt) throw new StorageError("Migration reputation expiry is invalid.");
+        await requireUnused("automod_reputation_cache", "user_id = ? AND policy_key = ?", [userId, record.policyKey]);
+        await tx.run(
+          `INSERT INTO automod_reputation_cache
+             (namespace, user_id, policy_key, case_id, result, checked_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [this.namespace, userId, record.policyKey, caseId, json(record.result), checkedAt, expiresAt],
+        );
+        return;
+      }
+      case "reputation-budget": {
+        const nextAt = stateTime(record.nextAt, "reputation API interval time");
+        const blockedUntil = stateTime(record.blockedUntil, "reputation API cooldown time");
+        const dayKey = stateTime(record.dayKey, "reputation API day");
+        const requestsToday = stateTime(record.requestsToday, "reputation API daily request count");
+        const apiRequests = stateTime(record.apiRequests, "reputation API request count");
+        if (requestsToday > apiRequests) throw new StorageError("Migration reputation request counts are invalid.");
+        await tx.run(
+          `UPDATE automod_reputation_budget
+           SET next_at = ?, blocked_until = ?, day_key = ?, requests_today = ?, api_requests = ?
+           WHERE namespace = ?`,
+          [nextAt, blockedUntil, dayKey, requestsToday, apiRequests, this.namespace],
         );
         return;
       }
