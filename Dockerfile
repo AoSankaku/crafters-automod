@@ -1,13 +1,15 @@
-FROM oven/bun:1.3.14-alpine AS build
+FROM node:24-bookworm-slim AS build
 
 WORKDIR /app
-COPY package.json ./
+RUN npm install --global pnpm@11.25.0
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
 COPY src ./src
-COPY test ./test
+COPY scripts ./scripts
 COPY rules.md rules.generated.json ./
-RUN bun run build
+RUN pnpm run build
 
-FROM oven/bun:1.3.14-alpine
+FROM node:24-bookworm-slim
 
 WORKDIR /app
 ENV NODE_ENV=production \
@@ -15,12 +17,12 @@ ENV NODE_ENV=production \
 
 COPY --from=build /app/dist ./dist
 COPY package.json ./
-RUN mkdir -p /app/data && chown -R bun:bun /app/data
+RUN mkdir -p /app/data && chown -R node:node /app/data
 
-USER bun
+USER node
 EXPOSE 8787
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD bun -e "const r=await fetch('http://127.0.0.1:'+process.env.HEALTH_PORT+'/health');if(!r.ok)process.exit(1)"
+  CMD node -e "fetch('http://127.0.0.1:'+process.env.HEALTH_PORT+'/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
 
-CMD ["bun", "run", "./dist/index.js"]
+CMD ["node", "./dist/index.js"]

@@ -7,8 +7,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createStore } from "../src/storage/index.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const nodeProbe = spawnSync("node", ["-p", "process.execPath"], { encoding: "utf8" });
-const node = nodeProbe.status === 0 ? nodeProbe.stdout.trim() : null;
+const nodeProbe = spawnSync("node", ["-p", 'Number(process.versions.node.split(".")[0]) >= 24 ? process.execPath : ""'], { encoding: "utf8" });
+const node = process.versions.bun ? (nodeProbe.status === 0 ? nodeProbe.stdout.trim() || null : null) : process.execPath;
 const directories = [];
 async function directory() {
   const path = await mkdtemp(join(tmpdir(), "automod-node-"));

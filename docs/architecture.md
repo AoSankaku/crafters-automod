@@ -15,7 +15,7 @@ Misskey localTimeline
   -> durable completion index + inbox tombstone
 ```
 
-Small installations use built-in `bun:sqlite`, WAL/FULL synchronization, a local database and one `all` process. Distributed installations use Bun's built-in PostgreSQL client, a dedicated Automod database, `ingest` producers and multiple `worker` processes. No Misskey database access or Redis is required. [Deployment and migration instructions](deployment.md) describe both configurations.
+Small installations use Node 24's `node:sqlite` or Bun's native SQLite, WAL/FULL synchronization, a local database and one `all` process. Distributed installations use Postgres.js under Node or Bun's native SQL client, a dedicated Automod database, `ingest` producers and multiple `worker` processes. A lazy driver factory preserves the same durable adapter, schema and transaction algorithms. No Misskey database access or Redis is required. [Deployment and migration instructions](deployment.md) describe both configurations.
 
 ## Component responsibilities
 
@@ -27,6 +27,8 @@ Small installations use built-in `bun:sqlite`, WAL/FULL synchronization, a local
 | `durable-worker.js` | Bounded concurrency, lease renewal/cancellation, retries and dead letters |
 | `storage/index.js` | Atomic inbox claims, user leases, audit, completion, jobs, human decisions, journal and API budget |
 | `moderation.js`, `enforcement.js` | Case transitions, authority gates and guarded Misskey mutations |
+| `storage/drivers.js`, `storage/sqlite-node.js` | Lazy Node/Bun database selection; shared durable storage algorithms |
+| `environment.js`, `scripts/` | Runtime environment loading and policy-validated Node/Bun builds |
 | `moderation-note.js` | Bounded, deduplicated T1/T2/T3 summaries appended to Misskey moderation notes |
 | `shared-authority.js`, `human-authority.js` | Shared decisions and SQLite's local fail-closed override file |
 | `rate-limiter.js`, `misskey.js` | Shared API admission, cooldown, timeouts and sanitized errors |
@@ -86,4 +88,4 @@ Historical purge remains queued only. `users/notes` cannot enumerate all followe
 
 Streaming has no durable acknowledgment or backfill here. Durability begins after intake DB commit; disconnections, downtime, overflow and pre-commit crashes may lose events. `localTimeline` also does not cover every visibility. Full coverage requires a reliable Misskey-side event outbox. Live Misskey behavior and production throughput remain unverified.
 
-Runtime references: [Bun SQLite](https://bun.sh/docs/runtime/sqlite), [Bun SQL](https://bun.sh/docs/runtime/sql), [PostgreSQL locking](https://www.postgresql.org/docs/18/explicit-locking.html).
+Runtime references: [Node SQLite](https://nodejs.org/api/sqlite.html), [Postgres.js](https://github.com/porsager/postgres), [Bun SQLite](https://bun.sh/docs/runtime/sqlite), [Bun SQL](https://bun.sh/docs/runtime/sql), [PostgreSQL locking](https://www.postgresql.org/docs/18/explicit-locking.html).

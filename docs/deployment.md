@@ -1,6 +1,6 @@
 # 同居配置と分散配置
 
-小規模ではMisskeyと同じホストで、Bun内蔵SQLiteを使うAutomod 1プロセスを動かせます。追加のDBサーバーは不要です。大規模ではAutomod専用のPostgreSQLに状態を共有し、受信プロセスと複数の処理ワーカーを別ホストへ配置できます。MisskeyのDB・Redisへ直接アクセスする必要はありません。
+小規模ではMisskeyと同じホストで、Node.js標準SQLite（Bun選択時はBun内蔵SQLite）を使うAutomod 1プロセスを動かせます。追加のDBサーバーは不要です。大規模ではAutomod専用のPostgreSQLに状態を共有し、受信プロセスと複数の処理ワーカーを別ホストへ配置できます。MisskeyのDB・Redisへ直接アクセスする必要はありません。
 
 | 構成 | 設定 | 保存先 | プロセス |
 |---|---|---|---|
@@ -12,7 +12,7 @@
 
 ## 小規模: Misskeyとの同居
 
-Node.js・pnpmとBun 1.3.14以上を用意します。手動操作はpnpmで実行し、各スクリプトがBunのビルド・SQLite・SQL機能を利用します。pnpmの版はこのリポジトリの`packageManager`に従ってください。**pnpmでのインストールはBun本体を導入しません。** ビルドするユーザーで`bun --version`が実行できない場合は、先に[実行環境の導入手順](../README.md#0-実行環境の確認とbunの導入)に従ってBunとPATHを設定してください。
+通常はNode.js 24以上とpnpmを用意します。pnpmの版はこのリポジトリの`packageManager`に従ってください。ビルド・起動・管理CLIにBunは不要です。任意でBun 1.4.4以上も使えます。[ランタイムの選択](../README.md#bunで動かす場合任意)を参照してください。
 
 `.env.example`を`.env`へコピーし、URLとトークンを設定します。
 
@@ -40,11 +40,21 @@ Dockerは既存の`compose.yaml`を使います。
 docker compose up -d --build
 ```
 
+既定のDockerfileはNode版です。Bun版を選ぶ場合は単体構成の`services.automod.build`、分散構成の`x-automod.build`を次に変更してビルドします。
+
+```yaml
+build:
+  context: .
+  dockerfile: Dockerfile.bun
+```
+
 初期値`http://127.0.0.1:13000`は同じホストでの直接実行向けです。コンテナ内の`127.0.0.1`はコンテナ自身です。同じDockerネットワークなら`http://misskey:3000`などのサービス名、ホストなら到達可能な`http://host.docker.internal:13000`やHTTPS URLを使用します。ホストのMisskeyがループバックのみで待つ場合は、host-gatewayから到達できません。ホスト側の公開ポートとコンテナ内の待受ポートは異なる場合があります。`./data:/app/data`を永続化し、コンテナから書き込める所有者・権限にしてください。
 
 ## 大規模: PostgreSQLと受信・処理の分離
 
-Bun内蔵SQLクライアントを利用し、追加のnpm依存やRedisは不要です。検証にはPostgreSQL 18.6を使用しています。DBはMisskeyのスキーマと分け、Automod専用DB・ユーザーを用意します。別ホスト間ではDB接続のTLSとアクセス制限を設定してください。
+Node版は`postgres`ドライバーを使い、Bun版は内蔵SQLクライアントを使います。Nodeビルドにはドライバーを同梱し、実行先のRedisや追加のネイティブDBアドオンは不要です。検証にはPostgreSQL 18.6を使用しています。DBはMisskeyのスキーマと分け、Automod専用DB・ユーザーを用意します。別ホスト間ではDB接続のTLSとアクセス制限を設定してください。
+
+DB接続プールはAutomodの各プロセスにつき最大5本です。受信プロセス、worker、管理CLI、監視の分を合計してPostgreSQLの接続枠を確保してください。同じPostgreSQLサーバーにMisskey等も接続する場合、その接続数も`max_connections`を共有します。接続枠不足をworker数だけ増やして解消することはできません。
 
 ```ini
 MISSKEY_URL=https://misskey.example

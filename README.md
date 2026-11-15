@@ -40,33 +40,20 @@ Misskeyのローカルタイムラインを監視する、サーバー運営者�
 
 ## 最短の導入手順：Misskeyと同居
 
-必要なものはNode.js（pnpm実行用）、pnpm、Bun、接続可能なMisskey、専用のローカルモデレーターアカウントです。[Misskey本体](https://github.com/misskey-dev/misskey/blob/develop/package.json)と同様に、導入・ビルド・起動・管理CLIの手動操作はpnpmで行います。このリポジトリの`packageManager`はpnpm 11.25.0を指定しています。
+必要なものは**Node.js 24以上とpnpm**、接続可能なMisskey、専用のローカルモデレーターアカウントです。[Misskey本体](https://github.com/misskey-dev/misskey/blob/develop/package.json)と同様に、導入・ビルド・起動・管理CLIはpnpmで操作できます。**通常のpnpm手順にBunのインストールは不要です。** このリポジトリの`packageManager`はpnpm 11.25.0を指定しています。pnpm未導入の場合は[公式の導入手順](https://pnpm.io/installation)を参照してください。
 
-Automodの実行には`bun:sqlite`・`Bun.SQL`・Bunのビルド機能を使うため、**Bun 1.3.14以上も必要**です。pnpmの各スクリプトがBunを呼び出し、Bunが`.env`を読み込みます。外部npm依存はありません。DockerfileはBun 1.3.14を指定し、直近の開発検証はBun 1.4.4で行っています。pnpm未導入の場合は[公式の導入手順](https://pnpm.io/installation)を参照してください。
+小規模構成はNode.js標準のSQLite、大規模構成は純JavaScriptの`postgres`ドライバーを使います。ビルドはesbuild、テストはVitestです。Bunでも起動でき、[任意のBun手順](#bunで動かす場合任意)ではBun内蔵のSQLite・SQLとビルダーを利用します。開発検証はNode.js 24.18.0 / Bun 1.4.4で行っています。
 
-### 0. 実行環境の確認とBunの導入
+### 0. 実行環境の確認
 
-Automodをビルドするユーザーで、次の3つが実行できることを確認します。
+Automodをビルドするユーザーで、次の2つが実行できることを確認します。
 
 ```sh
 node --version
 pnpm --version
-bun --version
 ```
 
-**`pnpm install`はBun本体をインストールしません。** `sh: 1: bun: not found`は、Bunが未導入、またはそのシェルのPATHにない状態です。pnpmの更新通知とは関係ありません。
-
-Linuxでは[Bun公式のインストーラー](https://bun.com/docs/installation)を使えます。`curl`と`unzip`が必要です。Ubuntu/Debianで不足している場合は、先に`sudo apt update`と`sudo apt install -y curl unzip`を実行してください。
-
-```sh
-curl -fsSL https://bun.com/install | bash
-export PATH="$HOME/.bun/bin:$PATH"
-bun --version
-```
-
-表示された版が1.3.14以上であることを確認してから、以下の手順へ進みます。既に`$HOME/.bun/bin/bun`がある場合は、インストーラーを再実行せずPATHの設定だけで解消できます。次回ログイン時にも使えるよう、Bashなら`~/.bashrc`、Zshなら`~/.zshrc`にも同じPATH設定があることを確認してください。Windows・macOSの導入方法は公式ページを参照してください。
-
-途中のビルドでこのエラーになった場合は、Bunを導入して同じプロジェクトディレクトリで`pnpm run build`を再実行します。ビルド成功後に`pnpm start`を実行してください。systemdの専用ユーザーから使うBunの配置は[常駐手順](docs/systemd.md#4-unit-のインストール)を参照してください。
+`node --version`が24以上であることを確認してから進みます。旧版の`bun: not found`エラーが出る場合は、新しいソースと`package.json`へ更新し、`pnpm install --frozen-lockfile`からやり直してください。pnpmの更新通知はビルドエラーとは別です。
 
 ### 1. 取得と環境設定
 
@@ -126,7 +113,7 @@ pnpm run build
 pnpm start
 ```
 
-`pnpm start`はビルド済みサービスをBunで起動します。ビルドは生成ポリシーの整合性を検査し、`dist/index.js`と管理用`dist/cli.js`を作ります。
+`pnpm start`はビルド済みサービスをNode.jsで起動します。ビルドは生成ポリシーの整合性を検査し、`dist/index.js`と管理用`dist/cli.js`を作ります。PostgreSQLドライバーもNode版へ同梱するため、配置先にはこの2ファイルとESM指定用の`package.json`を置けば動かせます。ビルドに秘密の`.env`値は埋め込みません。起動・管理CLIは作業ディレクトリの`.env`を読み、明示した環境変数を優先します。
 
 ### 3. 確認してから制裁を有効化
 
@@ -140,6 +127,19 @@ pnpm run status
 `enforce`へ切り替える際は、受信を止め、旧モードのworkerで未完了ケースを処理してから、全プロセスの`AUTOMOD_MODE=enforce`をそろえて再起動します。**dry-runで受理済みの同じノートIDを、切り替え後に再制裁することはありません。** 新しいモードは新規に受理する投稿に適用します。
 
 常駐化する場合は[systemd手順](docs/systemd.md)を使えます。Misskeyとは別サービス・専用ユーザーで実行します。
+
+## Bunで動かす場合（任意）
+
+Bun 1.4.4以上でも同じ機能を利用できます。[Bun公式の導入手順](https://bun.com/docs/installation)で導入後、次を実行します。Bun用のビルド・起動・管理CLIはNode.jsを呼び出しません。
+
+```sh
+bun run build:bun
+bun run start:bun
+```
+
+管理操作は`bun run status:bun`、`bun run override:bun --scope user --id USER_ID --reason REASON`、`bun run migrate:bun`です。テストは`bun run test:bun`で実行できます。Node.js固有の相互運用テストはNode.js 24以上がある場合に実行します。Bun用のSQLite・PostgreSQL接続には内蔵ドライバーを使い、通常のpnpm経路と同じスキーマ・操作ジャーナル・API予算を共有します。
+
+実行環境を切り替える際はサービスを停止してデータをバックアップし、選んだランタイムで再ビルドして再起動してください。SQLiteの同じファイルを複数サービスで同時使用せず、複数workerのNode/Bun混在には共有PostgreSQLを使います。Dockerは通常の`Dockerfile`がNode版、`Dockerfile.bun`がBun版です。systemdのBun用`ExecStart`は[常駐手順](docs/systemd.md#4-unit-のインストール)を参照してください。
 
 ## Misskeyから判定ログを確認する
 
@@ -266,7 +266,7 @@ docker compose -f compose.distributed.yaml up -d --build --scale worker=2
 
 コンテナ内の`127.0.0.1`はコンテナ自身です。Misskeyも同じネットワークなら`http://misskey:3000`等のサービス名、ホストOSなら到達可能な`host.docker.internal`や公開HTTPS URLを使います。ホストのMisskeyがループバックだけで待ち受ける場合、host-gatewayからは接続できません。
 
-単体構成の`./data:/app/data`は永続化が必要です。コンテナ内のBunユーザーに書き込み権限を与え、ヘルスチェック用ポートはホストのループバックへ限定しています。
+単体構成の`./data:/app/data`は永続化が必要です。コンテナ内の実行ユーザー（Node版は`node`、Bun版は`bun`）に書き込み権限を与え、ヘルスチェック用ポートはホストのループバックへ限定しています。
 
 詳細は[配置・停止移行・分散設定](docs/deployment.md)、[systemd](docs/systemd.md)、[Compose単体](compose.yaml)、[Compose分散](compose.distributed.yaml)を参照してください。
 

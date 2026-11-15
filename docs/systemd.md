@@ -2,21 +2,21 @@
 
 Automod は Docker に依存していないため、Misskey と同じ Linux ホスト上で独立した systemd サービスとして実行できます。Misskey のプロセスや実行ユーザーには同居させず、専用ユーザー、専用環境ファイル、専用データディレクトリを使用してください。
 
-以下は一般的な Linux 配置例です。既存のディレクトリ構成、Bun の場所、Misskey の待受アドレスに合わせて変更してください。
+以下は一般的な Linux 配置例です。既存のディレクトリ構成、Node.jsまたはBunの場所、Misskeyの待受アドレスに合わせて変更してください。
 
 同じunitをAutomod専用ホストにも配置できます。同居・別ホストの選択、設定サンプル、移行手順、規模に関する制約は [配置ガイド](deployment.md) を参照してください。
 
 ## 1. ビルド
 
-Node.js・pnpmとBun 1.3.14以上を用意し、運用ホストまたは同等のビルド環境のソースディレクトリで、インストール・テスト・ビルドを実行します。pnpmの版はこのリポジトリの`packageManager`に従ってください。
-
-`pnpm install`はBun本体を導入しません。ビルドするユーザーで`bun --version`を実行できることを先に確認してください。`bun: not found`の場合は[READMEの導入手順](../README.md#0-実行環境の確認とbunの導入)を使います。
+通常はNode.js 24以上とpnpmを用意し、運用ホストまたは同等のビルド環境のソースディレクトリで、インストール・テスト・ビルドを実行します。pnpmの版はこのリポジトリの`packageManager`に従ってください。Bunは不要です。
 
 ```sh
 pnpm install --frozen-lockfile
 pnpm test
 pnpm run build
 ```
+
+Bun 1.4.4以上で運用する場合は、代わりに`bun run test:bun`と`bun run build:bun`を使います。Node固有の相互運用テストはNode.js 24以上がある環境で実行します。
 
 `rules.md` を変更した場合は、この会話で `rules.generated.json` を再生成してからビルドしてください。生成物が古い場合、ビルドは失敗します。
 
@@ -30,6 +30,7 @@ sudo install -d -o crafters-automod -g crafters-automod -m 0700 /var/lib/crafter
 sudo install -o root -g root -m 0644 dist/index.js /opt/crafters-automod/dist/index.js
 sudo install -o root -g root -m 0644 dist/cli.js /opt/crafters-automod/dist/cli.js
 sudo install -o root -g root -m 0644 README.md /opt/crafters-automod/README.md
+sudo install -o root -g root -m 0644 package.json /opt/crafters-automod/package.json
 ```
 
 既に同名ユーザーが存在する場合、`useradd` は不要です。アプリケーションコードは root 所有の読み取り専用、監査データだけを `crafters-automod` 所有にします。
@@ -73,13 +74,16 @@ sudo chmod 0600 /etc/crafters-automod.env
 
 ## 4. unit のインストール
 
-まずBunの絶対パスを確認します。
+まずサービスから参照できるNode.js 24以上の絶対パスを確認します。
 
 ```sh
-command -v bun
+command -v node
+node --version
 ```
 
-同梱unitは `/usr/local/bin/bun` を想定しています。公式インストーラーでログインユーザーの`$HOME/.bun/bin/bun`へ導入した場合、unitの`ProtectHome=true`によりその場所をサービスから参照できません。インストール済みのBunが正常に動くことを確認してから、サービス用の場所へ配置します。
+同梱unitは`ExecStart=/usr/bin/node /opt/crafters-automod/dist/index.js`を使います。Node.jsが別の場所にある場合は、[unit](../deploy/systemd/crafters-automod.service)の`ExecStart`を実際の絶対パスに変更してください。`ProtectHome=true`なので、nvm等でホーム内にだけ導入したNode.jsは使えません。サービスから参照できる場所へNode.jsを導入してください。
+
+Bunで動かす場合はBun版でビルドし、`ExecStart=/usr/local/bin/bun /opt/crafters-automod/dist/index.js`へ変更します。Bun公式インストーラーで`$HOME/.bun/bin/bun`へ導入した場合は、正常動作を確認してからサービス用の場所へ配置します。
 
 ```sh
 "$HOME/.bun/bin/bun" --version
@@ -87,9 +91,9 @@ sudo install -o root -g root -m 0755 "$HOME/.bun/bin/bun" /usr/local/bin/bun
 /usr/local/bin/bun --version
 ```
 
-既にサービスから参照できる別の場所へBunを導入している場合は、[deploy/systemd/crafters-automod.service](../deploy/systemd/crafters-automod.service)の`ExecStart`をその絶対パスに変更します。Bun更新後はサービス用のコピーも更新し、版を確認してから再起動してください。
+既にサービスから参照できる別の場所へBunを導入している場合は、その絶対パスを指定します。Bun更新後はサービス用のコピーも更新し、版を確認してから再起動してください。
 
-ソースディレクトリでの手動操作はpnpmを使います。常駐サービスの配置先にはビルド済みファイルを置き、unitはBunを直接起動します。サービス用ユーザーのPATHへpnpmやNode.jsを追加する必要はありません。Dockerイメージもビルド済みファイルをBunで直接起動します。
+常駐サービスはビルド済みファイルを選んだランタイムで直接起動し、pnpmを経由しません。Node版のビルドにPostgreSQLドライバーも含めるので、配置先での`pnpm install`は不要です。Bun版は内蔵SQLクライアントを使います。同じSQLiteを使うNode版・Bun版を同時起動しないでください。
 
 ```sh
 sudo install -o root -g root -m 0644 \
@@ -116,11 +120,12 @@ curl --fail http://127.0.0.1:8787/health
 
 ## 6. 更新と停止
 
-更新前に `pnpm install --frozen-lockfile`、`pnpm test`、`pnpm run build` を成功させ、新しい `dist/index.js` を配置してから再起動します。
+Node版は更新前に`pnpm install --frozen-lockfile`、`pnpm test`、`pnpm run build`を成功させます。Bun版は`bun run test:bun`、`bun run build:bun`を使います。選んだランタイムでのビルド成功後、成果物と`package.json`を配置して再起動します。
 
 ```sh
 sudo install -o root -g root -m 0644 dist/index.js /opt/crafters-automod/dist/index.js
 sudo install -o root -g root -m 0644 dist/cli.js /opt/crafters-automod/dist/cli.js
+sudo install -o root -g root -m 0644 package.json /opt/crafters-automod/package.json
 sudo systemctl restart crafters-automod.service
 ```
 
@@ -145,7 +150,7 @@ CPUQuota=25%
 
 PostgreSQL構成は同じunitの環境設定を`ingest`または`worker`へ変更して別ホストで実行できます。同一ホストで複数unitを動かす場合はunit名・環境ファイル・ヘルスポートを分けてください。全プロセスで同じDB、namespace、ルール、動作モード、API間隔を使用します。詳細とSQLiteからの停止移行は[配置ガイド](deployment.md)を参照してください。
 
-管理CLIは`/opt/crafters-automod/dist/cli.js`です。サービスと同じ環境変数を安全に読み込む管理用実行環境から、`bun /opt/crafters-automod/dist/cli.js status`、`override --scope user --id USER_ID --reason REASON`、停止移行時の`migrate`を実行します。systemdの`EnvironmentFile`は通常のシェル構文とは異なるため、そのまま`source`しないでください。トークンやDB URLをコマンド履歴へ直接書かないでください。
+管理CLIは`/opt/crafters-automod/dist/cli.js`です。サービスと同じ環境変数を安全に読み込む管理用実行環境から、`node /opt/crafters-automod/dist/cli.js status`、`override --scope user --id USER_ID --reason REASON`、停止移行時の`migrate`を実行します。Bun運用時は`node`を`bun`に置き換えます。systemdの`EnvironmentFile`は通常のシェル構文とは異なるため、そのまま`source`しないでください。トークンやDB URLをコマンド履歴へ直接書かないでください。
 
 ## 現在の機能境界
 
