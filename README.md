@@ -113,7 +113,7 @@ pnpm run build
 pnpm start
 ```
 
-`pnpm start`はビルド済みサービスをNode.jsで起動します。ビルドは生成ポリシーの整合性を検査し、`dist/index.js`と管理用`dist/cli.js`を作ります。PostgreSQLドライバーもNode版へ同梱するため、配置先にはこの2ファイルとESM指定用の`package.json`を置けば動かせます。ビルドに秘密の`.env`値は埋め込みません。起動・管理CLIは作業ディレクトリの`.env`を読み、明示した環境変数を優先します。
+`pnpm start`はビルド済みサービスをNode.jsで前面起動します。コンソールが戻らないのは通常の動作で、Ctrl+Cで停止します。ターミナルを空けたまま動かす場合は[短い常駐化コマンド](docs/daemon.md)の`pnpm daemon:start`を使ってください。ビルドは生成ポリシーの整合性を検査し、`dist/index.js`と管理用`dist/cli.js`を作ります。PostgreSQLドライバーもNode版へ同梱するため、systemd等の配置先にはこの2ファイルとESM指定用の`package.json`を置けば動かせます。ビルドに秘密の`.env`値は埋め込みません。起動・管理CLIは作業ディレクトリの`.env`を読み、明示した環境変数を優先します。
 
 ### 3. 確認してから制裁を有効化
 
@@ -126,7 +126,7 @@ pnpm run status
 
 `enforce`へ切り替える際は、受信を止め、旧モードのworkerで未完了ケースを処理してから、全プロセスの`AUTOMOD_MODE=enforce`をそろえて再起動します。**dry-runで受理済みの同じノートIDを、切り替え後に再制裁することはありません。** 新しいモードは新規に受理する投稿に適用します。
 
-常駐化する場合は[systemd手順](docs/systemd.md)を使えます。Misskeyとは別サービス・専用ユーザーで実行します。
+短い操作で常駐化する場合は[PM2のクイックガイド](docs/daemon.md)、Linuxの専用ユーザー・サービスとして配置する場合は[systemd手順](docs/systemd.md)を使えます。
 
 ## Bunで動かす場合（任意）
 

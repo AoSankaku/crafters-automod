@@ -5,6 +5,7 @@ import { loadConfig } from "./config.js";
 import { loadGeneratedRules } from "./generated-rules.js";
 import { Logger } from "./logger.js";
 import { loadReputationPolicy } from "./reputation-policy.js";
+import { registerShutdownHandlers } from "./shutdown.js";
 
 async function main() {
   loadEnvironment();
@@ -13,16 +14,13 @@ async function main() {
   const rules = loadGeneratedRules(generatedDocument);
   const reputationPolicy = loadReputationPolicy(generatedDocument);
   const controller = new AbortController();
-  const shutdown = () => controller.abort();
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
+  const unregisterShutdown = registerShutdownHandlers(controller);
   try {
     await runApplication({
       config, rules, reputationPolicy, sourceSha256: generatedDocument.sourceSha256, logger, signal: controller.signal,
     });
   } finally {
-    process.removeListener("SIGINT", shutdown);
-    process.removeListener("SIGTERM", shutdown);
+    unregisterShutdown();
   }
 }
 

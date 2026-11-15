@@ -17,6 +17,14 @@
     "rules:check": "node ./scripts/check-rules.js",
     "build": "node ./scripts/build.js",
     "start": "node ./dist/index.js",
+    "daemon:start": "pm2 start ecosystem.config.cjs --only crafters-automod",
+    "daemon:stop": "pm2 stop crafters-automod",
+    "daemon:restart": "pm2 restart ecosystem.config.cjs --only crafters-automod --update-env",
+    "daemon:status": "pm2 status crafters-automod",
+    "daemon:logs": "pm2 logs crafters-automod --lines 50",
+    "daemon:remove": "pm2 delete crafters-automod",
+    "daemon:start:bun": "pm2 start ecosystem.bun.config.cjs --only crafters-automod",
+    "daemon:restart:bun": "pm2 restart ecosystem.bun.config.cjs --only crafters-automod --update-env",
     "dev": "node ./src/index.js",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
@@ -39,6 +47,7 @@
   "devDependencies": {
     "@vitest/coverage-v8": "5.1.0",
     "esbuild": "0.28.2",
+    "pm2": "7.1.2",
     "vitest": "5.1.0"
   }
 }

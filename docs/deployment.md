@@ -34,6 +34,8 @@ pnpm start
 
 [systemdの手順](systemd.md)と[同居用環境ファイル](../deploy/systemd/same-host.env.example)も使用できます。Misskeyと別サービス・専用ユーザーで動かしてください。SQLiteはローカルディスクに置き、NFSや複数ホストで共有せず、1プロセスで使用します。WALとFULL同期で、保存済みの未完了ケースを再起動後に再開します。
 
+コンソールを空けて動かす簡単な方法は[PM2の短い常駐化コマンド](daemon.md)です。`pnpm daemon:start`で起動し、`pnpm daemon:stop`で停止できます。systemd・Docker・前面起動との重複実行を避けてください。
+
 Dockerは既存の`compose.yaml`を使います。
 
 ```sh
