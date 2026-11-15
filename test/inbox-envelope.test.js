@@ -13,6 +13,18 @@ const note = {
 };
 
 describe("durable inbox envelope", () => {
+  test("queues an explicit body-free reputation candidate without inventing a deterministic verdict", () => {
+    const reputationPolicy = { id: "stopforumspam-account", enabled: true, tier: "T3", excludedUserIds: [] };
+    const envelope = createInboxEnvelope({ ...note, text: "ordinary private note" }, rules, { ...options, reputationPolicy });
+    expect(envelope).toEqual({ schemaVersion: 2, kind: "account-reputation", sourceSha256, mode: "dry-run",
+      caseId: "note-1", noteId: "note-1", userId: "user-1", ruleId: "stopforumspam-account" });
+    expect(JSON.stringify(envelope)).not.toMatch(/private|username|email|ip/);
+    expect(validateInboxEnvelope(envelope, { ...options, rules, reputationPolicy })).toEqual(envelope);
+    for (const change of [{ tier: "T1" }, { ruleId: "unknown" }, { sourceSha256: "b".repeat(64) }, { text: "private" }]) {
+      expect(() => validateInboxEnvelope({ ...envelope, ...change }, { ...options, rules, reputationPolicy })).toThrow();
+    }
+    expect(createInboxEnvelope({ ...note, text: "ordinary" }, rules, { ...options, reputationPolicy: { ...reputationPolicy, excludedUserIds: ["user-1"] } })).toBeNull();
+  });
   test("persists classification and IDs without raw note content or user profile", () => {
     const envelope = createInboxEnvelope(note, rules, options);
     expect(envelope).toEqual({
