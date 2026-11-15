@@ -44,6 +44,15 @@ describe("compiled reputation policy", () => {
 });
 
 describe("account reputation enrichment", () => {
+  test("does not disclose an old account snapshot after an IP API budget wait", async () => {
+    const h = harness({ checkIp: true });
+    h.misskey.getUserIps.mockImplementation(async () => {
+      h.review.clock = () => now + 3600000;
+      return [{ ip: "8.8.8.8", createdAt: new Date(now).toISOString() }];
+    });
+    expect((await h.review.check(h.envelope, h.context)).result.status).toBe("unavailable");
+    expect(h.provider.lookup).not.toHaveBeenCalled();
+  });
   test("queries only verified account identifiers and stores no email, IP or hash", async () => {
     const h = harness();
     const assessment = await h.review.check(h.envelope, h.context);
