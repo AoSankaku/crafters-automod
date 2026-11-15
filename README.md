@@ -58,7 +58,7 @@ Copy-Item -LiteralPath .env.example -Destination .env
 公開リポジトリの取得にはGitHubの認証は不要です。変更をpushする際は権限を持つアカウントで認証してください。`.env`を編集し、まず次の設定を確認します。
 
 ```ini
-MISSKEY_URL=http://127.0.0.1:3000
+MISSKEY_URL=http://127.0.0.1:13000
 MISSKEY_TOKEN=replace-with-a-moderator-token
 AUTOMOD_MODE=dry-run
 AUTOMOD_BACKEND=sqlite
@@ -68,7 +68,7 @@ AUTOMOD_DATA_DIR=data
 SFS_ENABLED=false
 ```
 
-`MISSKEY_URL`は実際のAPI・WebSocket両方へ到達できるURLに変更します。同居でもMisskeyがそのアドレスで待ち受けていなければ接続できません。
+`MISSKEY_URL`の初期値は、同じホストで直接起動する構成向けの`http://127.0.0.1:13000`です。Misskeyの実際の待受が異なる場合や、AutomodをDocker・別ホストで実行する場合は、API・WebSocket両方へ到達できるURLに変更してください。既存の`.env`はサンプル更新では書き換わりません。
 
 専用トークンには、ユーザー照会`admin/show-user`、T1を使う場合は`admin/suspend-user`、T2を使う場合は`admin/roles/assign`に必要な権限を用意します。T2の制限内容はMisskey側の手動ロールで設定し、IDを`T2_ROLE_ID`へ指定します。T2を有効なルールとして`enforce`する場合、このIDは必須です。
 

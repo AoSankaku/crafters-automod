@@ -15,7 +15,7 @@
 `.env.example`を`.env`へコピーし、URLとトークンを設定します。
 
 ```ini
-MISSKEY_URL=http://127.0.0.1:3000
+MISSKEY_URL=http://127.0.0.1:13000
 MISSKEY_TOKEN=replace-with-a-moderator-token
 AUTOMOD_BACKEND=sqlite
 AUTOMOD_ROLE=all
@@ -37,7 +37,7 @@ Dockerは既存の`compose.yaml`を使います。
 docker compose up -d --build
 ```
 
-コンテナ内の`127.0.0.1`はコンテナ自身です。同じDockerネットワークなら`http://misskey:3000`などのサービス名、ホストなら到達可能な`http://host.docker.internal:3000`やHTTPS URLを使用します。ホストのMisskeyがループバックのみで待つ場合は、host-gatewayから到達できません。`./data:/app/data`を永続化し、コンテナから書き込める所有者・権限にしてください。
+初期値`http://127.0.0.1:13000`は同じホストでの直接実行向けです。コンテナ内の`127.0.0.1`はコンテナ自身です。同じDockerネットワークなら`http://misskey:3000`などのサービス名、ホストなら到達可能な`http://host.docker.internal:13000`やHTTPS URLを使用します。ホストのMisskeyがループバックのみで待つ場合は、host-gatewayから到達できません。ホスト側の公開ポートとコンテナ内の待受ポートは異なる場合があります。`./data:/app/data`を永続化し、コンテナから書き込める所有者・権限にしてください。
 
 ## 大規模: PostgreSQLと受信・処理の分離
 

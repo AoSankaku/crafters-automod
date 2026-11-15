@@ -45,7 +45,7 @@ sudo install -o crafters-automod -g crafters-automod -m 0600 \
 [同居用サンプル](../deploy/systemd/same-host.env.example)と[別ホスト用サンプル](../deploy/systemd/separate-host.env.example)も利用できます。どちらもトークンなどを実際の値へ変更し、初回は `dry-run` で起動してください。
 
 ```ini
-MISSKEY_URL=http://127.0.0.1:3000
+MISSKEY_URL=http://127.0.0.1:13000
 MISSKEY_TOKEN=replace-with-a-moderator-token
 AUTOMOD_MODE=dry-run
 AUTOMOD_BACKEND=sqlite
@@ -61,7 +61,7 @@ HEALTH_PORT=8787
 MIN_ACTION_INTERVAL_MS=1100
 ```
 
-Misskey が `127.0.0.1:3000` で待ち受けていない場合は、リバースプロキシ経由の公開 HTTPS URL など、運用ホストから API と WebSocket の両方へ到達できるURLを指定します。初回導入は必ず `AUTOMOD_MODE=dry-run` にしてください。
+初期値は同居構成向けの`http://127.0.0.1:13000`です。Misskeyが別のアドレスやポートで待ち受けている場合は実際の接続先を指定します。別ホストなら公開HTTPS URLなど、運用ホストからAPIとWebSocketの両方へ到達できるURLを指定してください。初回導入は必ず`AUTOMOD_MODE=dry-run`にします。
 
 ```sh
 sudo chown root:root /etc/crafters-automod.env
