@@ -70,7 +70,23 @@ SFS_ENABLED=false
 
 `MISSKEY_URL`の初期値は、同じホストで直接起動する構成向けの`http://127.0.0.1:13000`です。Misskeyの実際の待受が異なる場合や、AutomodをDocker・別ホストで実行する場合は、API・WebSocket両方へ到達できるURLに変更してください。既存の`.env`はサンプル更新では書き換わりません。
 
-専用トークンには、ユーザー照会`admin/show-user`、T1を使う場合は`admin/suspend-user`、T2を使う場合は`admin/roles/assign`に必要な権限を用意します。T2の制限内容はMisskey側の手動ロールで設定し、IDを`T2_ROLE_ID`へ指定します。T2を有効なルールとして`enforce`する場合、このIDは必須です。
+Misskeyの「設定 → API」から専用トークンを発行し、値を`MISSKEY_TOKEN`へ保存します。発行するアカウント自体にも、利用する管理APIに応じた管理者・モデレーター権限が必要です。
+
+#### 発行画面で選ぶ権限（英語表示）
+
+「Enable all」は使わず、次のうち利用する機能に必要な項目だけをONにしてください。
+
+| 画面の区分 | 英語の項目名 | 権限ID | 用途・必要な場合 |
+|---|---|---|---|
+| Permissions | **View your account information** | `read:account` | 起動時の認証確認。必須 |
+| Admin Permissions | **View private user info** | `read:admin:show-user` | T1/T2の投稿者情報確認、SFS用の確認済みメール照会 |
+| Admin Permissions | **Suspend user** | `write:admin:suspend-user` | T1の凍結を`enforce`で使う場合 |
+| Admin Permissions | **Manage roles** | `write:admin:roles` | T2のロール付与を`enforce`で使う場合 |
+| Admin Permissions | **View user IP addresses** | `read:admin:user-ips` | `SFS_CHECK_IP=true`の場合のみ。発行元アカウントの管理者権限も必要 |
+
+通常のT1/T2運用では上の4項目、SFSのIP照会を使う場合は5項目です。「Delete user account」「Delete all files of a user」などの削除権限は、現在の実装には不要です。対応関係は[Misskey公式の英語権限一覧](https://misskey-hub.net/en/docs/for-developers/api/permission/)でも確認できます。
+
+T2の制限内容はMisskey側の手動ロールで設定し、IDを`T2_ROLE_ID`へ指定します。T2を有効なルールとして`enforce`する場合、このIDは必須です。発行したトークンはGitHubやチャットへ貼らず、サーバーの`.env`へ保存してください。
 
 ### 2. ルール設定とビルド
 
