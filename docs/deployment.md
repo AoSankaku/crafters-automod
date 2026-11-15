@@ -12,6 +12,8 @@
 
 ## 小規模: Misskeyとの同居
 
+Node.js・pnpmとBun 1.3.14以上を用意します。手動操作はpnpmで実行し、各スクリプトがBunのビルド・SQLite・SQL機能を利用します。pnpmの版はこのリポジトリの`packageManager`に従ってください。
+
 `.env.example`を`.env`へコピーし、URLとトークンを設定します。
 
 ```ini
@@ -25,8 +27,9 @@ AUTOMOD_DATA_DIR=data
 ```
 
 ```sh
-bun run build
-bun start
+pnpm install --frozen-lockfile
+pnpm run build
+pnpm start
 ```
 
 [systemdの手順](systemd.md)と[同居用環境ファイル](../deploy/systemd/same-host.env.example)も使用できます。Misskeyと別サービス・専用ユーザーで動かしてください。SQLiteはローカルディスクに置き、NFSや複数ホストで共有せず、1プロセスで使用します。WALとFULL同期で、保存済みの未完了ケースを再起動後に再開します。
@@ -54,7 +57,7 @@ AUTOMOD_MODE=dry-run
 MIN_ACTION_INTERVAL_MS=1100
 ```
 
-処理ホストでは同じ設定を使い、`AUTOMOD_ROLE=worker`、`WORKER_CONCURRENCY=4`などを指定します。各プロセスで`bun start`を実行します。複数ワーカーは同じDBからリース付きで取得し、同じユーザーへの同時処理を防ぎます。受信プロセスを複数起動した場合も同じノートIDは1ケースになります。
+処理ホストでは同じ設定を使い、`AUTOMOD_ROLE=worker`、`WORKER_CONCURRENCY=4`などを指定します。各プロセスで`pnpm start`を実行します。複数ワーカーは同じDBからリース付きで取得し、同じユーザーへの同時処理を防ぎます。受信プロセスを複数起動した場合も同じノートIDは1ケースになります。
 
 Dockerの新規分散構成例は`compose.distributed.yaml`です。`.env`に設定した`AUTOMOD_POSTGRES_PASSWORD`にはURL中でも安全な十分長い英数字を使います（例: ランダムな64桁の16進数）。この例はDBをホストのポートへ公開しません。
 
@@ -76,13 +79,13 @@ SQLiteからPostgreSQLへ切り替えるときは、次の順序で行います�
 1. 全Automodの受信・処理プロセスを停止する。Misskey本体は停止不要。
 2. `AUTOMOD_DATA_DIR`全体をバックアップする。SQLiteのWAL/SHMが残る場合も含める。移行元を再稼働させない。
 3. 新しいビルドを作り、移行元ディレクトリと**既存と同じnamespace**を指定する。接続URLを変更する場合は旧URLから生成されたnamespaceを明示する。
-4. `AUTOMOD_BACKEND=postgres`と移行先DB URLを設定し、未使用の移行先namespaceに対して`bun run migrate`を実行する。
-5. 成功後に`bun run status`で件数を確認し、受信とworkerを同じ設定で起動する。移行前と同じルール・動作モードで残存ケースを処理する。
+4. `AUTOMOD_BACKEND=postgres`と移行先DB URLを設定し、未使用の移行先namespaceに対して`pnpm run migrate`を実行する。
+5. 成功後に`pnpm run status`で件数を確認し、受信とworkerを同じ設定で起動する。移行前と同じルール・動作モードで残存ケースを処理する。
 
 ```sh
-bun run build
-bun run migrate
-bun run status
+pnpm run build
+pnpm run migrate
+pnpm run status
 ```
 
 完了ID、監査、未処理ケース、両ジョブキュー、人間オーバーライド、制裁ジャーナル、APIクールダウンを転送します。`human-overrides.json`も移行元DBへ反映してからコピーします。実行中だったケースは古いリースを捨てて再処理待ちへ戻します。通信・プロセス停止で中断した移行は同じ移行元から再実行できます。件数とダイジェストを検証し、移行完了まで移行先での通常処理を禁止します。使用済みnamespaceへの混在を拒否します。待機期限は絶対時刻で引き継ぐため、移行元・先の時刻をNTP等で同期してください。移行後に旧SQLiteへ単純に戻すと判断履歴が分岐するため、旧プロセスの自動起動も解除してください。
@@ -94,8 +97,8 @@ SQLiteのまま別ホストへ移す場合も全プロセスを止め、デー�
 分散構成の人間判断は、全プロセスが使う共有DBへ登録します。ビルド済みCLIを同じ環境設定で実行してください。
 
 ```sh
-bun run override --scope user --id USER_ID --reason "Moderator resolved the case"
-bun run override --scope case --id NOTE_ID --reason "Human decision"
+pnpm run override --scope user --id USER_ID --reason "Moderator resolved the case"
+pnpm run override --scope case --id NOTE_ID --reason "Human decision"
 ```
 
 `case`、`note`、`user`に対応します。操作を取り消すコマンドではなく、以後の自動変更を禁止する判断です。SQLite構成では従来の`human-overrides.json`も操作直前に再読込します。PostgreSQL構成ではローカルファイルを共有しないため、必ずCLIで登録してください。Misskey管理画面の操作が自動的にこのDBへ同期される機能はありません。人間が処置する前にオーバーライドを登録し、必要な復元はMisskey側で実施してください。
@@ -104,7 +107,7 @@ bun run override --scope case --id NOTE_ID --reason "Human decision"
 
 ## 監視と限界
 
-`/health`の`queue`には`pending`、`running`、`dead`、`completed`、`reviewJobs`、`purgeJobs`、`oldestPendingAt`、`apiRequests`、`apiBlockedUntil`を返します。`noteProcessing`はDB保存待ち、受理・重複・拒否・失敗数、`worker`は稼働中・完了・失敗・リース喪失数です。`bun run status`でもDBの件数を確認できます。
+`/health`の`queue`には`pending`、`running`、`dead`、`completed`、`reviewJobs`、`purgeJobs`、`oldestPendingAt`、`apiRequests`、`apiBlockedUntil`を返します。`noteProcessing`はDB保存待ち、受理・重複・拒否・失敗数、`worker`は稼働中・完了・失敗・リース喪失数です。`pnpm run status`でもDBの件数を確認できます。
 
 - `MAX_INBOX_JOBS`はpending/running/dead合計の上限（既定10万）。deadも枠を消費し、黙って消去しません。到達・保存失敗・保存待ちメモリ上限では受信を停止し、監督プロセスに失敗を返します。
 - `WORK_MAX_ATTEMPTS`（既定5）で再試行を制限し、指数バックオフ後も失敗するケースはdeadに保存します。DBから消さず人間が監査・判断してください。自動dead再投入はありません。

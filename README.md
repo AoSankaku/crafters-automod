@@ -40,13 +40,16 @@ Misskeyのローカルタイムラインを監視する、サーバー運営者�
 
 ## 最短の導入手順：Misskeyと同居
 
-必要なものはBun、接続可能なMisskey、専用のローカルモデレーターアカウントです。外部npm依存はありません。`package.json`とDockerfileはBun 1.3.14を指定し、直近の開発検証はBun 1.4.4で行っています。
+必要なものはNode.js（pnpm実行用）、pnpm、Bun、接続可能なMisskey、専用のローカルモデレーターアカウントです。[Misskey本体](https://github.com/misskey-dev/misskey/blob/develop/package.json)と同様に、導入・ビルド・起動・管理CLIの手動操作はpnpmで行います。このリポジトリの`packageManager`はpnpm 11.25.0を指定しています。
+
+Automodの実行には`bun:sqlite`・`Bun.SQL`・Bunのビルド機能を使うため、**Bun 1.3.14以上も必要**です。pnpmの各スクリプトがBunを呼び出し、Bunが`.env`を読み込みます。外部npm依存はありません。DockerfileはBun 1.3.14を指定し、直近の開発検証はBun 1.4.4で行っています。pnpm未導入の場合は[公式の導入手順](https://pnpm.io/installation)を参照してください。
 
 ### 1. 取得と環境設定
 
 ```sh
 git clone https://github.com/AoSankaku/crafters-automod.git
 cd crafters-automod
+pnpm install --frozen-lockfile
 cp .env.example .env
 ```
 
@@ -95,17 +98,17 @@ T2の制限内容はMisskey側の手動ロールで設定し、IDを`T2_ROLE_ID`
 [ルールの設定方法](#ルールの設定方法)に従って`rules.md`と生成物を更新します。本文フィルターをまだ設定しない場合でも接続確認はできますが、SFSも無効なら分類対象はありません。
 
 ```sh
-bun run build
-bun start
+pnpm run build
+pnpm start
 ```
 
-Bunが作業ディレクトリの`.env`を読み込みます。ビルドは生成ポリシーの整合性を検査し、`dist/index.js`と管理用`dist/cli.js`を作ります。
+`pnpm start`はビルド済みサービスをBunで起動します。ビルドは生成ポリシーの整合性を検査し、`dist/index.js`と管理用`dist/cli.js`を作ります。
 
 ### 3. 確認してから制裁を有効化
 
 ```sh
 curl --fail http://127.0.0.1:8787/health
-bun run status
+pnpm run status
 ```
 
 ログと監査を見て、誤検知がないこと、T2ロールが意図した権限になっていることを確認します。最初はT3・dry-runで観察し、T1/T2は対象と理由を十分に確認してから使ってください。
@@ -200,8 +203,8 @@ IPを使う場合は`SFS_CHECK_IP=true`も必要です。専用の`admin/get-use
 人間が処置する前に、同じ環境設定で対象を登録します。
 
 ```sh
-bun run override --scope user --id USER_ID --reason "Moderator resolved the case"
-bun run override --scope case --id NOTE_ID --reason "Human decision"
+pnpm run override --scope user --id USER_ID --reason "Moderator resolved the case"
+pnpm run override --scope case --id NOTE_ID --reason "Human decision"
 ```
 
 scopeは`user`、`case`、`note`です。case IDはノートIDと同じです。これは以後の自動変更を禁止する判断で、完了した凍結・ロール付与を取り消すコマンドではありません。復元はMisskey側で行います。管理画面の変更を自動的に共有DBへ同期する機能は未実装です。
@@ -246,7 +249,7 @@ docker compose -f compose.distributed.yaml up -d --build --scale worker=2
 ## 日常運用と主な設定
 
 ```sh
-bun run status
+pnpm run status
 curl --fail http://127.0.0.1:8787/health
 ```
 
@@ -276,15 +279,15 @@ LLMレビューと削除のキューは現在自動消費されません。監�
 
 ## 更新・バックアップ・移行
 
-ソース更新後は`bun run build`を成功させてから再起動します。ルールやモードを変える場合は、前述の旧ケース処理も先に行います。
+ソース更新後は`pnpm install --frozen-lockfile`と`pnpm run build`を成功させてから再起動します。ルールやモードを変える場合は、前述の旧ケース処理も先に行います。
 
 SQLiteのバックアップ・ホスト移動・PostgreSQLへの移行は全Automodを停止して行い、`AUTOMOD_DATA_DIR`全体を保存します。残存するWAL/SHMも含め、namespaceを引き継いでください。
 
 PostgreSQLへは移行先の設定を用意し、未使用namespaceへコピーします。
 
 ```sh
-bun run migrate
-bun run status
+pnpm run migrate
+pnpm run status
 ```
 
 人間判断、監査、未処理ケース、完了ID、両ジョブキュー、操作ジャーナル、SFSキャッシュ、API予算・待機期限を引き継ぎます。中断した移行は同じ移行元で再実行でき、件数・ダイジェストの検証完了まで通常処理を禁止します。[手順と注意点](docs/deployment.md#既存データの移行)を参照してください。
@@ -292,11 +295,11 @@ bun run status
 ## 開発と検証
 
 ```sh
-bun test
-bun run build
+pnpm test
+pnpm run build
 ```
 
-通常のテストは外部SFS / 実Misskeyへユーザー情報を送りません。PostgreSQLテストは`AUTOMOD_TEST_DATABASE_URL`を指定した場合だけ実行します。専用の使い捨てテストDBを使ってください。coverageは`bun test --coverage`で確認できます。
+通常のテストは外部SFS / 実Misskeyへユーザー情報を送りません。PostgreSQLテストは`AUTOMOD_TEST_DATABASE_URL`を指定した場合だけ実行します。専用の使い捨てテストDBを使ってください。coverageは`pnpm run test:coverage`で確認できます。
 
 実SQLite・PostgreSQLでの重複防止、共有予算、人間優先、障害復旧、移行はテスト済みです。実SFSには架空メールのハッシュで疎通を確認しています。**実Misskeyでの稼働・権限・負荷検証、Docker / systemdでの実配置は未検証です。**
 

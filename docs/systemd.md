@@ -8,11 +8,12 @@ Automod は Docker に依存していないため、Misskey と同じ Linux ホ�
 
 ## 1. ビルド
 
-運用ホストまたは同等のビルド環境で、テストとビルドを実行します。
+Node.js・pnpmとBun 1.3.14以上を用意し、運用ホストまたは同等のビルド環境のソースディレクトリで、インストール・テスト・ビルドを実行します。pnpmの版はこのリポジトリの`packageManager`に従ってください。
 
 ```sh
-bun test
-bun run build
+pnpm install --frozen-lockfile
+pnpm test
+pnpm run build
 ```
 
 `rules.md` を変更した場合は、この会話で `rules.generated.json` を再生成してからビルドしてください。生成物が古い場合、ビルドは失敗します。
@@ -78,6 +79,8 @@ command -v bun
 
 同梱unitは `/usr/local/bin/bun` を想定しています。結果が異なる場合は、[deploy/systemd/crafters-automod.service](../deploy/systemd/crafters-automod.service) の `ExecStart` を実際の絶対パスに変更します。
 
+ソースディレクトリでの手動操作はpnpmを使います。常駐サービスの配置先にはビルド済みファイルを置き、unitはBunを直接起動します。サービス用ユーザーのPATHへpnpmやNode.jsを追加する必要はありません。Dockerイメージもビルド済みファイルをBunで直接起動します。
+
 ```sh
 sudo install -o root -g root -m 0644 \
   deploy/systemd/crafters-automod.service /etc/systemd/system/crafters-automod.service
@@ -103,7 +106,7 @@ curl --fail http://127.0.0.1:8787/health
 
 ## 6. 更新と停止
 
-更新前に `bun test` と `bun run build` を成功させ、新しい `dist/index.js` を配置してから再起動します。
+更新前に `pnpm install --frozen-lockfile`、`pnpm test`、`pnpm run build` を成功させ、新しい `dist/index.js` を配置してから再起動します。
 
 ```sh
 sudo install -o root -g root -m 0644 dist/index.js /opt/crafters-automod/dist/index.js
